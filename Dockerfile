@@ -3,9 +3,9 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies
+# Copy package files and install dependencies
 COPY package*.json ./
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci --legacy-peer-deps || npm install --legacy-peer-deps; else npm install --legacy-peer-deps; fi
 
 # Copy source code and build client
 COPY . .

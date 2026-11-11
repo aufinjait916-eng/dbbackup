@@ -179,7 +179,7 @@ export const DatabaseQueueTable: React.FC<DatabaseQueueTableProps> = ({
           <Database className="w-8 h-8 mx-auto text-slate-400 dark:text-slate-600 mb-2" />
           <p className="text-sm font-medium">No databases in queue</p>
           <p className="text-xs mt-1">
-            Provide a JSON file in the &quot;JSON Database Input&quot; tab or discover databases from your TrueNAS PostgreSQL server.
+            Click &quot;Discover Server DBs&quot; above to automatically query all non-template databases from PostgreSQL, or add a database name manually.
           </p>
         </div>
       ) : (

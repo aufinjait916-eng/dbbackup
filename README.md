@@ -7,12 +7,11 @@ A modern, automated web application designed to take backups of all specified Po
 ## 🚀 Features
 
 - **TrueNAS Environment Integration**: Reads server connection details directly from TrueNAS environment variables (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE`, `POSTGRES_SSL`).
-- **Flexible JSON Input**: Upload or paste any JSON file containing a list of database names (array of strings, object with `databases` array, or list of database objects).
+- **Interactive Server Discovery**: Auto-discovers all non-template databases directly from your PostgreSQL server catalog (`pg_database`) with a single click.
 - **Sequential 1-by-1 Downloads**: Takes backups and triggers automated sequential browser downloads with polite throttling to avoid browser pop-up blockers.
 - **Dual Backup Engine**: Uses native `pg_dump` when installed or falls back smoothly to a pure TypeScript/Node.js PostgreSQL dumper.
-- **Interactive Server Discovery**: Auto-discover all non-template databases directly from your PostgreSQL server with a single click.
 - **Connection Health Prober**: Test latency and connection to the TrueNAS PostgreSQL server with clear diagnostic hints.
-- **GitHub Actions Workflows**: Includes ready-to-run workflows for GitHub Pages static deployment and multi-arch Docker image publishing to GitHub Container Registry (`ghcr.io`).
+- **GitHub Actions Workflows**: Includes ready-to-run, dependency-resilient workflows for GitHub Pages static deployment and multi-arch Docker image publishing to GitHub Container Registry (`ghcr.io`).
 
 ---
 
@@ -30,45 +29,6 @@ Configure these environment variables in your TrueNAS SCALE App Settings (**Apps
 | `POSTGRES_SSL` | Enable SSL encryption (`true` / `false` / `require`) | `false` | `false` |
 
 *(Note: Aliases prefixed with `TRUENAS_POSTGRES_*` and standard `PGHOST`/`PGUSER` are also supported).*
-
----
-
-## 📄 JSON Input Format
-
-You can upload or paste a JSON file in any of these common formats:
-
-### Format A: Simple String Array
-```json
-[
-  "nextcloud_db",
-  "vaultwarden_db",
-  "homeassistant_db",
-  "immich_db"
-]
-```
-
-### Format B: Structured Object
-```json
-{
-  "server": "truenas-core-01",
-  "databases": [
-    "nextcloud_db",
-    "vaultwarden_db",
-    "homeassistant_db",
-    "immich_db"
-  ]
-}
-```
-
-### Format C: Object Array with metadata
-```json
-{
-  "databases": [
-    { "name": "nextcloud_db", "priority": "high" },
-    { "name": "vaultwarden_db", "priority": "critical" }
-  ]
-}
-```
 
 ---
 

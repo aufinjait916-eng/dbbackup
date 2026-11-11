@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { DatabaseItem, ServerConfig, ConnectionTestResult, LogEntry } from './types';
 import { Header } from './components/Header';
 import { ServerEnvBanner } from './components/ServerEnvBanner';
-import { JsonInputPanel } from './components/JsonInputPanel';
 import { DatabaseQueueTable } from './components/DatabaseQueueTable';
 import { BatchProgressCard } from './components/BatchProgressCard';
 import { SqlPreviewModal } from './components/SqlPreviewModal';
@@ -54,7 +53,7 @@ const INITIAL_DATABASES: DatabaseItem[] = [
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'backups' | 'json' | 'server' | 'deployment'>('backups');
+  const [activeTab, setActiveTab] = useState<'backups' | 'server' | 'deployment'>('backups');
   const [isDark, setIsDark] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       return (
@@ -258,19 +257,6 @@ export default function App() {
     } finally {
       setDiscovering(false);
     }
-  };
-
-  // Load databases from JSON parser
-  const handleDatabasesLoaded = (names: string[]) => {
-    const newItems: DatabaseItem[] = names.map((name, i) => ({
-      id: `imported_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
-      name,
-      selected: true,
-      status: 'idle',
-      progress: 0,
-    }));
-    setDatabases(newItems);
-    addLog('success', `Loaded ${newItems.length} databases from JSON input into backup queue`);
   };
 
   // Database queue item operations
@@ -593,19 +579,6 @@ export default function App() {
 
             {/* Live Activity Log Drawer */}
             <LogDrawer logs={logs} onClearLogs={() => setLogs([])} />
-          </div>
-        )}
-
-        {/* Tab Content: JSON Database Input */}
-        {activeTab === 'json' && (
-          <div className="space-y-6">
-            <JsonInputPanel
-              onDatabasesLoaded={(names) => {
-                handleDatabasesLoaded(names);
-                setActiveTab('backups');
-              }}
-              currentDatabasesCount={databases.length}
-            />
           </div>
         )}
 

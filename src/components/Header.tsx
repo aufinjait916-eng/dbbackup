@@ -2,8 +2,8 @@ import React from 'react';
 import { Database, ShieldCheck, Sun, Moon } from 'lucide-react';
 
 interface HeaderProps {
-  activeTab: 'backups' | 'json' | 'server' | 'deployment';
-  setActiveTab: (tab: 'backups' | 'json' | 'server' | 'deployment') => void;
+  activeTab: 'backups' | 'server' | 'deployment';
+  setActiveTab: (tab: 'backups' | 'server' | 'deployment') => void;
   isDark: boolean;
   toggleDark: () => void;
   onPrimaryAction: () => void;
@@ -24,7 +24,7 @@ export const Header: React.FC<HeaderProps> = ({
     <header className="flex items-center justify-between gap-8 px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 transition-colors">
       {/* Zone 1: Brand Wordmark (Single text element) */}
       <div className="flex items-center gap-3 shrink-0">
-        <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-600 text-white shadow-sm">
+        <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-600 text-white shadow-xs">
           <Database className="w-4 h-4" />
         </div>
         <span className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
@@ -42,17 +42,7 @@ export const Header: React.FC<HeaderProps> = ({
               : ''
           }`}
         >
-          Backup Queue
-        </button>
-        <button
-          onClick={() => setActiveTab('json')}
-          className={`hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 ${
-            activeTab === 'json'
-              ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
-              : ''
-          }`}
-        >
-          JSON Database Input
+          Database Queue
         </button>
         <button
           onClick={() => setActiveTab('server')}
@@ -72,7 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
               : ''
           }`}
         >
-          Deployment & GitHub
+          Deployment &amp; Workflows
         </button>
       </nav>
 
@@ -95,7 +85,7 @@ export const Header: React.FC<HeaderProps> = ({
               ? 'bg-amber-600 text-white cursor-not-allowed'
               : selectedCount === 0
               ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed'
-              : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm'
+              : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
           }`}
         >
           <ShieldCheck className="w-4 h-4" />
