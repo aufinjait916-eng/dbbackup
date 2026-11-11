@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TrueNAS PostgreSQL Backup Database List",
+  "description": "List of databases to be backed up and downloaded one by one",
+  "server": "truenas-pg-primary",
+  "databases": [
+    "nextcloud_db",
+    "vaultwarden_db",
+    "homeassistant_db",
+    "immich_db",
+    "gitea_db",
+    "authentik_db",
+    "paperless_db"
+  ],
+  "options": {
+    "includeSchema": true,
+    "includeData": true,
+    "cleanIfExists": true
+  }
+}

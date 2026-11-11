@@ -1,0 +1,6 @@
+{
+  "name": "TrueNAS PostgreSQL Backup Manager",
+  "description": "Automated PostgreSQL database backup and sequential downloader configured via TrueNAS environment variables with JSON batch database input and GitHub Actions deployment workflows.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

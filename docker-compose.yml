@@ -1,0 +1,22 @@
+services:
+  truenas-postgres-backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: truenas-postgres-backup:latest
+    container_name: truenas-postgres-backup
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # TrueNAS Host / PostgreSQL Server Connection
+      - POSTGRES_HOST=192.168.1.100
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=your_secure_postgres_password
+      - POSTGRES_DATABASE=postgres
+      - POSTGRES_SSL=false
+      - NODE_ENV=production
+    # Optional persistent storage for backups if server-side archiving is enabled
+    # volumes:
+    #   - /mnt/tank/backups/postgres:/backups
