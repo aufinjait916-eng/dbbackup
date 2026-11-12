@@ -38,7 +38,8 @@ This repository includes two GitHub Actions workflows:
 
 1. **Deploy to GitHub Pages (`.github/workflows/deploy.yml`)**:
    - Automatically builds and publishes the web interface to GitHub Pages on every push to `main` or `master`.
-   - In GitHub Settings → Pages, select **Source: GitHub Actions**.
+   - **Important**: In your GitHub repository, go to **Settings** → **Pages** (in the left sidebar) → set **Source** to **GitHub Actions** (not "Deploy from a branch"). This enables GitHub Actions permissions to publish your Pages site.
+   - If a previous run failed with `Get Pages site failed`, setting Source to GitHub Actions and clicking **Re-run all jobs** will immediately resolve it.
 
 2. **Publish Docker Image (`.github/workflows/docker-publish.yml`)**:
    - Builds multi-platform Docker images (`linux/amd64`, `linux/arm64`) and pushes to `ghcr.io/<your-username>/truenas-postgres-backup:latest`.

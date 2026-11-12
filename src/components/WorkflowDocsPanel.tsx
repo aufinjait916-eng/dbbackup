@@ -37,6 +37,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -52,9 +58,6 @@ jobs:
 
       - name: Build frontend application
         run: npm run build
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
@@ -99,6 +102,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies & build client
+        run: |
+          npm install --legacy-peer-deps
+          npm run build
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -228,12 +241,12 @@ jobs:
               {pagesWorkflow}
             </pre>
             <div className="p-3.5 rounded-lg bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 text-xs text-slate-700 dark:text-slate-300">
-              <strong>How to enable GitHub Pages in your repository:</strong>
-              <ol className="list-decimal ml-4 mt-1.5 space-y-1">
-                <li>Push this repository to GitHub (<code className="font-mono">git push origin main</code>).</li>
-                <li>Go to <strong>Settings → Pages</strong> in your GitHub repository.</li>
-                <li>Under <strong>Build and deployment → Source</strong>, select <strong>GitHub Actions</strong>.</li>
-                <li>The workflow will trigger automatically on push and publish your site!</li>
+              <strong>Fix for &quot;Get Pages site failed - Please verify that the repository has Pages enabled&quot;:</strong>
+              <ol className="list-decimal ml-4 mt-1.5 space-y-1.5">
+                <li>Go to your GitHub repository in your web browser: <strong>Settings</strong> (top tab).</li>
+                <li>In the left sidebar, click <strong>Pages</strong> (under &quot;Code and automation&quot;).</li>
+                <li>Under <strong>Build and deployment → Source</strong>, change the dropdown from <em>&quot;Deploy from a branch&quot;</em> to <strong>&quot;GitHub Actions&quot;</strong>.</li>
+                <li>Go to the <strong>Actions</strong> tab and click <strong>Re-run all jobs</strong> on the failed workflow. It will now succeed!</li>
               </ol>
             </div>
           </div>

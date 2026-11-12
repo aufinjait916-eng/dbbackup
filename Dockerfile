@@ -1,36 +1,43 @@
-# Stage 1: Build Frontend and Server
-FROM node:22-alpine AS builder
+# Stage 1: Build Frontend (runs natively on the build machine for maximum speed and compatibility)
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Copy package manifests and install dependencies
 COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci --legacy-peer-deps || npm install --legacy-peer-deps; else npm install --legacy-peer-deps; fi
+RUN npm install --legacy-peer-deps
 
-# Copy source code and build client
+# Copy source code and build client assets
 COPY . .
-RUN npm run build
+RUN if [ ! -d "dist" ] || [ ! -f "dist/index.html" ]; then \
+      npm run build; \
+    fi
 
 # Stage 2: Production Runtime with PostgreSQL Client Tools
-FROM node:22-alpine AS runner
+FROM node:22-bookworm-slim AS runner
 
 WORKDIR /app
 
-# Install postgresql-client for pg_dump and psql tools
-RUN apk add --no-cache postgresql-client bash curl
+# Install postgresql-client (pg_dump, psql) and curl for health checks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-client \
+    curl \
+    bash \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Copy package files and install production dependencies only
+# Copy package manifests and install production dependencies
 COPY package*.json ./
-RUN npm ci --omit=dev && npm install -g tsx
+RUN npm install --omit=dev --legacy-peer-deps && npm install -g tsx
 
-# Copy built frontend assets and server
+# Copy built frontend assets and server entry point
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server.ts ./server.ts
+COPY server.ts ./server.ts
 
-# Non-root user for security
+# Run as non-root user for security
 USER node
 
 EXPOSE 3000

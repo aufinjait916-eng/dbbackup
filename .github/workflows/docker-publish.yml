@@ -25,6 +25,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies & build client
+        run: |
+          npm install --legacy-peer-deps
+          npm run build
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
