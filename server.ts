@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import cookieParser from 'cookie-parser';
@@ -5,7 +6,6 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
 import { Client } from 'pg';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -26,8 +26,6 @@ import {
   getClientIp,
   getInactivityTimeoutMinutes,
 } from './server/authStore.ts';
-
-dotenv.config();
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -705,6 +703,7 @@ app.get('/api/config', requireAuth, (req: AuthenticatedRequest, res: Response) =
 
   // Only IT admins see full env var key list
   const isIt = req.authUser?.role === 'IT';
+  const authEnvStatus = isIt ? authStore.getEnvAuthStatus() : undefined;
 
   res.json({
     configured: envKeysFound.length > 0 || !!process.env.POSTGRES_HOST,
@@ -715,9 +714,12 @@ app.get('/api/config', requireAuth, (req: AuthenticatedRequest, res: Response) =
     sslEnabled: !!config.ssl,
     hasPassword: Boolean(config.password && config.password.length > 0),
     detectedEnvKeys: isIt ? envKeysFound : [],
+    authEnv: authEnvStatus,
     truenasPlatform:
       process.env.TRUENAS_SCALE === 'true' ||
       !!process.env.TRUENAS_POSTGRES_HOST ||
+      !!process.env.TRUENAS_ADMIN_USERNAME ||
+      !!process.env.TRUENAS_ADMIN_PASSWORD ||
       process.env.CONTAINER_NAME?.includes('truenas') ||
       false,
     nodeVersion: isIt ? process.version : undefined,

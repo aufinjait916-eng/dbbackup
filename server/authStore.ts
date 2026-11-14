@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -89,6 +90,7 @@ export type AuditAction =
   | 'ZIP_BUNDLE_DOWNLOADED'
   | 'SCHEDULE_UPDATED'
   | 'SCHEDULED_BACKUP_RUN'
+  | 'ENV_CREDENTIALS_SYNCED'
   | 'CSRF_REJECTED'
   | 'RBAC_DENIED';
 
@@ -148,12 +150,17 @@ interface AuthStoreData {
   sessions: SessionRecord[];
   auditLogs: AuditLogEntry[];
   backupSchedule?: BackupScheduleConfig;
+  lastEnvAdminSyncDigest?: string;
+  lastEnvManagerSyncDigest?: string;
 }
 
 export const SESSION_COOKIE_NAME = 'tn_pg_session';
 export const PRE_CSRF_COOKIE_NAME = 'tn_pg_pre_csrf';
 
-const DATA_DIR = path.resolve(process.cwd(), process.env.AUTH_DATA_DIR || './data');
+const DATA_DIR = path.resolve(
+  process.cwd(),
+  process.env.TRUENAS_AUTH_DATA_DIR || process.env.AUTH_DATA_DIR || './data'
+);
 const STORE_FILE = path.join(DATA_DIR, 'auth-store.json');
 const KEY_FILE = path.join(DATA_DIR, '.master.key');
 
@@ -178,7 +185,7 @@ export function getInactivityTimeoutMinutes(): number {
 
 // Resolve or persist a 32-byte master key for AES-256-GCM + HMAC
 function resolveMasterKey(): Buffer {
-  const envSecret = process.env.SESSION_SECRET;
+  const envSecret = process.env.TRUENAS_SESSION_SECRET || process.env.SESSION_SECRET;
   if (envSecret && envSecret.trim().length >= 16) {
     return crypto.createHash('sha256').update(envSecret.trim()).digest();
   }
@@ -328,6 +335,90 @@ export function sanitizeUser(user: StoredUser): SanitizedUser {
   };
 }
 
+const ADMIN_USERNAME_ENV_KEYS = [
+  'TRUENAS_ADMIN_USERNAME',
+  'TRUENAS_LOGIN_USERNAME',
+  'IT_ADMIN_USERNAME',
+  'ADMIN_USERNAME',
+] as const;
+const ADMIN_EMAIL_ENV_KEYS = [
+  'TRUENAS_ADMIN_EMAIL',
+  'TRUENAS_LOGIN_EMAIL',
+  'IT_ADMIN_EMAIL',
+  'ADMIN_EMAIL',
+] as const;
+const ADMIN_PASSWORD_ENV_KEYS = [
+  'TRUENAS_ADMIN_PASSWORD',
+  'TRUENAS_LOGIN_PASSWORD',
+  'IT_ADMIN_PASSWORD',
+  'ADMIN_PASSWORD',
+] as const;
+const MANAGER_USERNAME_ENV_KEYS = ['TRUENAS_MANAGER_USERNAME', 'MANAGER_USERNAME'] as const;
+const MANAGER_EMAIL_ENV_KEYS = ['TRUENAS_MANAGER_EMAIL', 'MANAGER_EMAIL'] as const;
+const MANAGER_PASSWORD_ENV_KEYS = ['TRUENAS_MANAGER_PASSWORD', 'MANAGER_PASSWORD'] as const;
+
+function pickFirstEnv(keys: readonly string[]): { key: string | null; value: string } {
+  for (const key of keys) {
+    const raw = process.env[key];
+    if (typeof raw === 'string' && raw.length > 0) {
+      return { key, value: raw };
+    }
+  }
+  return { key: null, value: '' };
+}
+
+function resolveEnvLoginConfig() {
+  const adminUserEnv = pickFirstEnv(ADMIN_USERNAME_ENV_KEYS);
+  const adminEmailEnv = pickFirstEnv(ADMIN_EMAIL_ENV_KEYS);
+  const adminPassEnv = pickFirstEnv(ADMIN_PASSWORD_ENV_KEYS);
+
+  const mgrUserEnv = pickFirstEnv(MANAGER_USERNAME_ENV_KEYS);
+  const mgrEmailEnv = pickFirstEnv(MANAGER_EMAIL_ENV_KEYS);
+  const mgrPassEnv = pickFirstEnv(MANAGER_PASSWORD_ENV_KEYS);
+
+  const adminUsername = (adminUserEnv.value || 'it-admin').trim().toLowerCase();
+  const adminEmail = (adminEmailEnv.value || 'it-admin@truenas.local').trim().toLowerCase();
+  const adminPassword = adminPassEnv.value || 'TrueNAS-Admin-2026!';
+  const resetAdminMfa = process.env.TRUENAS_RESET_ADMIN_MFA === 'true';
+
+  const mgrUsername = mgrUserEnv.value.trim().toLowerCase();
+  const mgrEmail = (mgrEmailEnv.value || (mgrUsername ? `${mgrUsername}@truenas.local` : '')).trim().toLowerCase();
+  const mgrPassword = mgrPassEnv.value;
+
+  const detectedKeys = [
+    adminUserEnv.key,
+    adminEmailEnv.key,
+    adminPassEnv.key,
+    mgrUserEnv.key,
+    mgrEmailEnv.key,
+    mgrPassEnv.key,
+    resetAdminMfa ? 'TRUENAS_RESET_ADMIN_MFA' : null,
+  ].filter((k): k is string => Boolean(k));
+
+  return {
+    admin: {
+      username: adminUsername,
+      email: adminEmail,
+      password: adminPassword,
+      hasExplicitUsername: Boolean(adminUserEnv.key && adminUsername),
+      hasExplicitEmail: Boolean(adminEmailEnv.key && adminEmail),
+      hasExplicitPassword: Boolean(adminPassEnv.key && adminPassEnv.value.length > 0),
+      resetMfa: resetAdminMfa,
+    },
+    manager: {
+      username: mgrUsername,
+      email: mgrEmail,
+      password: mgrPassword,
+      configured: Boolean(mgrUserEnv.key && mgrUsername && mgrPassEnv.key && mgrPassword.length > 0),
+    },
+    detectedKeys,
+  };
+}
+
+function computeEnvSyncDigest(parts: string[]): string {
+  return crypto.createHmac('sha256', MASTER_KEY).update(parts.join('\u0000')).digest('hex');
+}
+
 class AuthStore {
   private data: AuthStoreData = {
     users: [],
@@ -340,6 +431,7 @@ class AuthStore {
   constructor() {
     this.load();
     this.bootstrapAdminIfEmpty();
+    this.syncEnvCredentials();
   }
 
   private load() {
@@ -355,6 +447,10 @@ class AuthStore {
           backupSchedule: parsed.backupSchedule
             ? { ...createDefaultBackupSchedule(), ...parsed.backupSchedule }
             : createDefaultBackupSchedule(),
+          lastEnvAdminSyncDigest:
+            typeof parsed.lastEnvAdminSyncDigest === 'string' ? parsed.lastEnvAdminSyncDigest : undefined,
+          lastEnvManagerSyncDigest:
+            typeof parsed.lastEnvManagerSyncDigest === 'string' ? parsed.lastEnvManagerSyncDigest : undefined,
         };
       } catch (err) {
         console.error('Failed to parse auth-store.json, initializing fresh store:', err);
@@ -367,12 +463,16 @@ class AuthStore {
       }
     }
     this.pruneExpiredSessions();
+    const envCfg = resolveEnvLoginConfig();
     authTrace('STORE_LOADED', {
       userCount: this.data.users.length,
       activeSessions: this.data.sessions.length,
-      hasSessionSecretEnv: Boolean(process.env.SESSION_SECRET && process.env.SESSION_SECRET.trim().length >= 16),
-      hasItAdminPasswordEnv: Boolean(process.env.IT_ADMIN_PASSWORD),
-      hashAlgorithm: 'bcryptjs (bcrypt $2b$12$)',
+      hasSessionSecretEnv: Boolean(
+        (process.env.TRUENAS_SESSION_SECRET || process.env.SESSION_SECRET || '').trim().length >= 16
+      ),
+      hasAdminEnvCredentials: envCfg.admin.hasExplicitUsername || envCfg.admin.hasExplicitPassword,
+      hasManagerEnvCredentials: envCfg.manager.configured,
+      hashAlgorithm: 'bcryptjs (bcrypt)',
       totpAlgorithm: 'HMAC-SHA1 / 6 digits / 30s period / window +-2',
     });
   }
@@ -387,9 +487,8 @@ class AuthStore {
   private bootstrapAdminIfEmpty() {
     if (this.data.users.length > 0) return;
 
-    const username = (process.env.IT_ADMIN_USERNAME || 'it-admin').trim().toLowerCase();
-    const email = (process.env.IT_ADMIN_EMAIL || 'it-admin@truenas.local').trim().toLowerCase();
-    const password = process.env.IT_ADMIN_PASSWORD || 'TrueNAS-Admin-2026!';
+    const envCfg = resolveEnvLoginConfig();
+    const { username, email, password, hasExplicitUsername, hasExplicitEmail, hasExplicitPassword } = envCfg.admin;
     const now = new Date().toISOString();
 
     const adminUser: StoredUser = {
@@ -414,6 +513,15 @@ class AuthStore {
     };
 
     this.data.users.push(adminUser);
+    if (hasExplicitUsername || hasExplicitEmail || hasExplicitPassword) {
+      this.data.lastEnvAdminSyncDigest = computeEnvSyncDigest([
+        hasExplicitUsername ? username : '',
+        hasExplicitEmail ? email : '',
+        hasExplicitPassword ? password : '',
+        envCfg.admin.resetMfa ? 'reset-mfa' : '',
+      ]);
+    }
+
     this.appendAudit({
       action: 'SYSTEM_BOOTSTRAP',
       outcome: 'SUCCESS',
@@ -423,13 +531,173 @@ class AuthStore {
       target: adminUser.username,
       ip: '127.0.0.1',
       userAgent: 'server-init',
-      details: `Bootstrapped initial IT admin account '${adminUser.username}' from environment configuration (mandatory MFA setup pending).`,
+      details: `Bootstrapped initial IT admin account '${adminUser.username}' from ${
+        hasExplicitPassword || hasExplicitUsername ? 'TrueNAS environment variables' : 'default configuration'
+      } (mandatory MFA setup pending).`,
     });
     this.persist();
 
     console.log(
       `[AUTH] Bootstrapped initial IT admin account '${username}' (mandatory TOTP MFA enrollment required on first login).`
     );
+  }
+
+  // Synchronize IT Admin / Manager credentials whenever TrueNAS environment variables change
+  private syncEnvCredentials() {
+    const envCfg = resolveEnvLoginConfig();
+    const { admin, manager } = envCfg;
+    let changed = false;
+
+    if (admin.hasExplicitUsername || admin.hasExplicitEmail || admin.hasExplicitPassword || admin.resetMfa) {
+      const digest = computeEnvSyncDigest([
+        admin.hasExplicitUsername ? admin.username : '',
+        admin.hasExplicitEmail ? admin.email : '',
+        admin.hasExplicitPassword ? admin.password : '',
+        admin.resetMfa ? 'reset-mfa' : '',
+      ]);
+
+      if (digest !== this.data.lastEnvAdminSyncDigest) {
+        const target =
+          this.data.users.find((u) => u.createdBy === 'env-bootstrap') ||
+          this.data.users.find((u) => u.username.toLowerCase() === admin.username) ||
+          this.data.users.find((u) => u.role === 'IT' && u.isActive) ||
+          this.data.users.find((u) => u.role === 'IT');
+
+        if (target) {
+          const syncedFields: string[] = [];
+
+          if (
+            admin.hasExplicitUsername &&
+            admin.username !== target.username &&
+            !this.data.users.some((u) => u.id !== target.id && u.username.toLowerCase() === admin.username)
+          ) {
+            target.username = admin.username;
+            syncedFields.push('username');
+          }
+
+          if (
+            admin.hasExplicitEmail &&
+            admin.email !== target.email &&
+            !this.data.users.some((u) => u.id !== target.id && u.email.toLowerCase() === admin.email)
+          ) {
+            target.email = admin.email;
+            syncedFields.push('email');
+          }
+
+          if (admin.hasExplicitPassword) {
+            target.passwordHash = bcrypt.hashSync(admin.password, 12);
+            target.failedAttempts = 0;
+            target.lockedUntil = null;
+            target.isActive = true;
+            syncedFields.push('password');
+          }
+
+          if (admin.resetMfa) {
+            target.mfaEnabled = false;
+            target.mustSetupMfa = true;
+            target.totpSecretEnc = null;
+            target.pendingTotpSecretEnc = null;
+            target.backupCodeHashes = [];
+            syncedFields.push('mfaReset');
+          }
+
+          if (syncedFields.length > 0) {
+            target.updatedAt = new Date().toISOString();
+            this.data.sessions = this.data.sessions.filter((s) => s.userId !== target.id);
+            this.data.lastEnvAdminSyncDigest = digest;
+            changed = true;
+            this.appendAudit({
+              action: 'ENV_CREDENTIALS_SYNCED',
+              outcome: 'SUCCESS',
+              actorId: target.id,
+              actorUsername: target.username,
+              actorRole: 'SYSTEM',
+              target: target.username,
+              ip: '127.0.0.1',
+              userAgent: 'truenas-env-sync',
+              details: `Synchronized IT Admin account '${target.username}' from TrueNAS environment variables (${syncedFields.join(', ')}).`,
+            });
+            console.log(`[AUTH] Synchronized IT Admin '${target.username}' from TrueNAS environment variables (${syncedFields.join(', ')}).`);
+          } else {
+            this.data.lastEnvAdminSyncDigest = digest;
+            changed = true;
+          }
+        }
+      }
+    }
+
+    if (manager.configured) {
+      const mgrDigest = computeEnvSyncDigest([manager.username, manager.email, manager.password]);
+      if (mgrDigest !== this.data.lastEnvManagerSyncDigest) {
+        const now = new Date().toISOString();
+        const existingMgr =
+          this.data.users.find((u) => u.username.toLowerCase() === manager.username) ||
+          this.data.users.find((u) => u.createdBy === 'env-manager' && u.role === 'Manager');
+
+        if (!existingMgr) {
+          const newMgr: StoredUser = {
+            id: `usr_${crypto.randomUUID()}`,
+            username: manager.username,
+            displayName: 'TrueNAS Backup Manager',
+            email: manager.email || `${manager.username}@truenas.local`,
+            role: 'Manager',
+            passwordHash: bcrypt.hashSync(manager.password, 12),
+            isActive: true,
+            mfaEnabled: false,
+            mustSetupMfa: true,
+            totpSecretEnc: null,
+            pendingTotpSecretEnc: null,
+            backupCodeHashes: [],
+            failedAttempts: 0,
+            lockedUntil: null,
+            createdAt: now,
+            updatedAt: now,
+            lastLoginAt: null,
+            createdBy: 'env-manager',
+          };
+          this.data.users.push(newMgr);
+          this.data.lastEnvManagerSyncDigest = mgrDigest;
+          changed = true;
+          this.appendAudit({
+            action: 'ENV_CREDENTIALS_SYNCED',
+            outcome: 'SUCCESS',
+            actorId: newMgr.id,
+            actorUsername: newMgr.username,
+            actorRole: 'SYSTEM',
+            target: newMgr.username,
+            ip: '127.0.0.1',
+            userAgent: 'truenas-env-sync',
+            details: `Bootstrapped Manager account '${newMgr.username}' from TrueNAS environment variables.`,
+          });
+        } else if (existingMgr.role === 'Manager') {
+          existingMgr.username = manager.username;
+          if (manager.email) existingMgr.email = manager.email;
+          existingMgr.passwordHash = bcrypt.hashSync(manager.password, 12);
+          existingMgr.isActive = true;
+          existingMgr.failedAttempts = 0;
+          existingMgr.lockedUntil = null;
+          existingMgr.updatedAt = now;
+          this.data.sessions = this.data.sessions.filter((s) => s.userId !== existingMgr.id);
+          this.data.lastEnvManagerSyncDigest = mgrDigest;
+          changed = true;
+          this.appendAudit({
+            action: 'ENV_CREDENTIALS_SYNCED',
+            outcome: 'SUCCESS',
+            actorId: existingMgr.id,
+            actorUsername: existingMgr.username,
+            actorRole: 'SYSTEM',
+            target: existingMgr.username,
+            ip: '127.0.0.1',
+            userAgent: 'truenas-env-sync',
+            details: `Synchronized Manager account '${existingMgr.username}' from TrueNAS environment variables.`,
+          });
+        }
+      }
+    }
+
+    if (changed) {
+      this.persist();
+    }
   }
 
   private pruneExpiredSessions() {
@@ -466,6 +734,7 @@ class AuthStore {
   }
 
   public getBootstrapInfo() {
+    const envCfg = resolveEnvLoginConfig();
     const singleUser = this.data.users.length === 1 ? this.data.users[0] : null;
     const bootstrapPending = Boolean(
       singleUser &&
@@ -474,11 +743,20 @@ class AuthStore {
         !singleUser.lastLoginAt
     );
     return {
-      hasEnvUsername: Boolean(process.env.IT_ADMIN_USERNAME),
-      hasEnvPassword: Boolean(process.env.IT_ADMIN_PASSWORD),
+      hasEnvUsername: envCfg.admin.hasExplicitUsername,
+      hasEnvPassword: envCfg.admin.hasExplicitPassword,
       totalUsers: this.data.users.length,
       bootstrapPending,
       bootstrapUsernameHint: bootstrapPending ? singleUser!.username : null,
+    };
+  }
+
+  public getEnvAuthStatus() {
+    const envCfg = resolveEnvLoginConfig();
+    return {
+      adminConfiguredViaEnv: envCfg.admin.hasExplicitUsername || envCfg.admin.hasExplicitPassword,
+      managerConfiguredViaEnv: envCfg.manager.configured,
+      detectedEnvKeys: envCfg.detectedKeys,
     };
   }
 
@@ -670,19 +948,20 @@ class AuthStore {
     const passwordValid = hashValidFormat && bcrypt.compareSync(password, user.passwordHash);
     const compareDurationMs = Date.now() - compareStartMs;
 
-    authTrace('LOGIN_PASSWORD_VERIFY', {
-      requestId,
-      userId: user.id,
-      username: user.username,
-      role: user.role,
-      hashValidFormat,
-      hashPrefix: typeof user.passwordHash === 'string' ? user.passwordHash.slice(0, 7) : 'none',
-      hashLength: typeof user.passwordHash === 'string' ? user.passwordHash.length : 0,
-      passwordLastUpdatedAt: user.updatedAt,
-      compareDurationMs,
-      passwordValid,
-      priorFailedAttempts: user.failedAttempts,
-    });
+    if (!passwordValid || process.env.DEBUG_AUTH === 'true') {
+      authTrace('LOGIN_PASSWORD_VERIFY', {
+        requestId,
+        userId: user.id,
+        username: user.username,
+        role: user.role,
+        hashValidFormat,
+        hashLength: typeof user.passwordHash === 'string' ? user.passwordHash.length : 0,
+        passwordLastUpdatedAt: user.updatedAt,
+        compareDurationMs,
+        passwordValid,
+        priorFailedAttempts: user.failedAttempts,
+      });
+    }
 
     if (!passwordValid) {
       user.failedAttempts += 1;

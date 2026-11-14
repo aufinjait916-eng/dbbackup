@@ -160,7 +160,14 @@ jobs:
       - POSTGRES_PASSWORD=your_secure_password
       - POSTGRES_DATABASE=postgres
       - POSTGRES_SSL=false
-      - NODE_ENV=production`;
+      - NODE_ENV=production
+      - TRUENAS_ADMIN_USERNAME=it-admin
+      - TRUENAS_ADMIN_EMAIL=it-admin@truenas.local
+      - TRUENAS_ADMIN_PASSWORD=ChangeMe_TrueNAS_Admin_2026!
+      - SESSION_SECRET=change-this-to-a-64-char-random-hex-string
+      - AUTH_DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data`;
 
   return (
     <div className="space-y-6">
@@ -363,22 +370,34 @@ jobs:
                   <td className="py-2.5 px-3 font-mono">true / require</td>
                 </tr>
                 <tr>
-                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">IT_ADMIN_USERNAME</td>
-                  <td className="py-2.5 px-3">First-boot IT administrator username</td>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">TRUENAS_ADMIN_USERNAME</td>
+                  <td className="py-2.5 px-3">IT admin login username synced from TrueNAS env (alias: <code className="font-mono">IT_ADMIN_USERNAME</code>)</td>
                   <td className="py-2.5 px-3 font-mono">it-admin</td>
                   <td className="py-2.5 px-3 font-mono">it-admin</td>
                 </tr>
                 <tr>
-                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">IT_ADMIN_EMAIL</td>
-                  <td className="py-2.5 px-3">First-boot IT administrator email</td>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">TRUENAS_ADMIN_EMAIL</td>
+                  <td className="py-2.5 px-3">IT admin login email synced from TrueNAS env (alias: <code className="font-mono">IT_ADMIN_EMAIL</code>)</td>
                   <td className="py-2.5 px-3 font-mono">it-admin@truenas.local</td>
                   <td className="py-2.5 px-3 font-mono">secops@company.local</td>
                 </tr>
                 <tr>
-                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">IT_ADMIN_PASSWORD</td>
-                  <td className="py-2.5 px-3">First-boot IT administrator password</td>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">TRUENAS_ADMIN_PASSWORD</td>
+                  <td className="py-2.5 px-3">IT admin login password synced on container start when changed (alias: <code className="font-mono">IT_ADMIN_PASSWORD</code>)</td>
                   <td className="py-2.5 px-3 font-mono">(bootstrapped)</td>
                   <td className="py-2.5 px-3 font-mono">StrongVaultPass#26</td>
+                </tr>
+                <tr>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">TRUENAS_MANAGER_USERNAME / _PASSWORD</td>
+                  <td className="py-2.5 px-3">Optional Manager account credentials synced from TrueNAS environment variables</td>
+                  <td className="py-2.5 px-3 font-mono">None</td>
+                  <td className="py-2.5 px-3 font-mono">backup-mgr</td>
+                </tr>
+                <tr>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">TRUENAS_RESET_ADMIN_MFA</td>
+                  <td className="py-2.5 px-3">Set to <code className="font-mono">true</code> on reboot to reset IT admin TOTP MFA enrollment</td>
+                  <td className="py-2.5 px-3 font-mono">false</td>
+                  <td className="py-2.5 px-3 font-mono">false</td>
                 </tr>
                 <tr>
                   <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">SESSION_SECRET</td>

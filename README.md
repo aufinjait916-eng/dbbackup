@@ -46,12 +46,14 @@ Configure these environment variables in your TrueNAS SCALE App Settings (**Apps
 
 *(Aliases prefixed with `TRUENAS_POSTGRES_*` and standard `PGHOST`/`PGUSER` are also supported).*
 
-### Authentication & Security Bootstrap
+### Login Credentials & Security (TrueNAS Environment Variables)
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `IT_ADMIN_USERNAME` | Initial IT Admin username (created if no users exist) | `it-admin` |
-| `IT_ADMIN_EMAIL` | Initial IT Admin email address | `it-admin@truenas.local` |
-| `IT_ADMIN_PASSWORD` | Initial IT Admin password (recommended to set securely) | `TrueNAS-Admin-2026!` |
+| `TRUENAS_ADMIN_USERNAME` *(or `IT_ADMIN_USERNAME`)* | IT Admin login username (synced automatically when updated) | `it-admin` |
+| `TRUENAS_ADMIN_EMAIL` *(or `IT_ADMIN_EMAIL`)* | IT Admin login email address | `it-admin@truenas.local` |
+| `TRUENAS_ADMIN_PASSWORD` *(or `IT_ADMIN_PASSWORD`)* | IT Admin login password (synced automatically when updated) | `TrueNAS-Admin-2026!` |
+| `TRUENAS_MANAGER_USERNAME` / `_PASSWORD` | Optional Manager login credentials managed via TrueNAS env | `None` |
+| `TRUENAS_RESET_ADMIN_MFA` | Set to `true` on container boot to reset IT Admin TOTP MFA | `false` |
 | `SESSION_SECRET` | Secret key used to sign CSRF tokens and derive store encryption | Auto-generated in `AUTH_DATA_DIR` |
 | `SESSION_INACTIVITY_MINUTES` | Sliding idle session timeout in minutes | `15` |
 | `AUTH_DATA_DIR` | Persistent directory for users, encrypted TOTP secrets, and audit logs | `./data` |
@@ -85,8 +87,8 @@ docker run -d \
   -e POSTGRES_PORT="5432" \
   -e POSTGRES_USER="postgres" \
   -e POSTGRES_PASSWORD="my_password" \
-  -e IT_ADMIN_USERNAME="it-admin" \
-  -e IT_ADMIN_PASSWORD="ChangeMe_StrongPassword_2026!" \
+  -e TRUENAS_ADMIN_USERNAME="it-admin" \
+  -e TRUENAS_ADMIN_PASSWORD="ChangeMe_StrongPassword_2026!" \
   -e SESSION_SECRET="replace-with-32-byte-random-hex" \
   ghcr.io/username/truenas-postgres-backup:latest
 ```
