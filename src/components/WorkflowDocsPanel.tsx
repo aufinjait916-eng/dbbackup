@@ -40,8 +40,6 @@ jobs:
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -248,12 +246,12 @@ jobs:
               {pagesWorkflow}
             </pre>
             <div className="p-3.5 rounded-lg bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 text-xs text-slate-700 dark:text-slate-300">
-              <strong>Fix for &quot;Get Pages site failed - Please verify that the repository has Pages enabled&quot;:</strong>
+              <strong>Fix for &quot;Get Pages site failed / Resource not accessible by integration&quot;:</strong>
               <ol className="list-decimal ml-4 mt-1.5 space-y-1.5">
-                <li>Go to your GitHub repository in your web browser: <strong>Settings</strong> (top tab).</li>
-                <li>In the left sidebar, click <strong>Pages</strong> (under &quot;Code and automation&quot;).</li>
-                <li>Under <strong>Build and deployment → Source</strong>, change the dropdown from <em>&quot;Deploy from a branch&quot;</em> to <strong>&quot;GitHub Actions&quot;</strong>.</li>
-                <li>Go to the <strong>Actions</strong> tab and click <strong>Re-run all jobs</strong> on the failed workflow. It will now succeed!</li>
+                <li><strong>Repository Visibility</strong>: Ensure the repository is <strong>Public</strong> (GitHub Free does not support GitHub Pages on Private repositories and returns 404/403).</li>
+                <li><strong>Enable Pages Source</strong>: Go to <strong>Settings</strong> → <strong>Pages</strong> → under <strong>Build and deployment → Source</strong>, select <strong>GitHub Actions</strong>.</li>
+                <li><strong>Workflow Permissions</strong>: Go to <strong>Settings</strong> → <strong>Actions</strong> → <strong>General</strong> → under <strong>Workflow permissions</strong>, select <strong>Read and write permissions</strong> and click <strong>Save</strong>.</li>
+                <li>Go to the <strong>Actions</strong> tab and click <strong>Re-run all jobs</strong> on the workflow.</li>
               </ol>
             </div>
           </div>
