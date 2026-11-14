@@ -26,8 +26,6 @@ interface LoginDashboardProps {
   pendingUser: AuthUser | null;
   sessionExpiredNotice: boolean;
   inactivityTimeoutMinutes: number;
-  bootstrapPending?: boolean;
-  bootstrapUsernameHint?: string | null;
   isDark: boolean;
   toggleDark: () => void;
   onAuthSuccess: (user: AuthUser, csrfToken: string) => void;
@@ -39,8 +37,6 @@ export const LoginDashboard: React.FC<LoginDashboardProps> = ({
   pendingUser,
   sessionExpiredNotice,
   inactivityTimeoutMinutes,
-  bootstrapPending = false,
-  bootstrapUsernameHint = null,
   isDark,
   toggleDark,
   onAuthSuccess,
@@ -357,17 +353,6 @@ export const LoginDashboard: React.FC<LoginDashboardProps> = ({
                 </div>
               )}
 
-              {bootstrapPending && !errorMsg && !sessionExpiredNotice && (
-                <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-300 space-y-1">
-                  <div className="font-semibold text-slate-800 dark:text-slate-100">
-                    Initial IT Admin Setup Pending
-                  </div>
-                  <p className="leading-relaxed">
-                    Sign in with username <code className="font-mono text-emerald-700 dark:text-emerald-400">{bootstrapUsernameHint || 'it-admin'}</code> and your configured <code className="font-mono">IT_ADMIN_PASSWORD</code> environment variable to enroll TOTP MFA.
-                  </p>
-                </div>
-              )}
-
               {errorMsg && (
                 <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 text-xs text-rose-900 dark:text-rose-200 flex items-start gap-2.5">
                   <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
@@ -415,7 +400,7 @@ export const LoginDashboard: React.FC<LoginDashboardProps> = ({
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     disabled={loginLoading || lockoutSeconds > 0}
-                    placeholder="it-admin"
+                    placeholder="Enter username or email"
                     className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                   />
                 </div>

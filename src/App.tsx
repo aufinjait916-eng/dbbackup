@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Clock } from 'lucide-react';
 import {
   DatabaseItem,
   ServerConfig,
@@ -7,6 +7,7 @@ import {
   LogEntry,
   AuthFlowStatus,
   AuthUser,
+  BackupScheduleConfig,
 } from './types';
 import { Header, AppTab } from './components/Header';
 import { ServerEnvBanner } from './components/ServerEnvBanner';
@@ -19,6 +20,7 @@ import { LoginDashboard } from './components/LoginDashboard';
 import { UserManagementPanel } from './components/UserManagementPanel';
 import { AuditLogPanel } from './components/AuditLogPanel';
 import { AccountSecurityModal } from './components/AccountSecurityModal';
+import { AutoSchedulePanel } from './components/AutoSchedulePanel';
 import {
   triggerBrowserDownload,
   createZipBundle,
@@ -30,6 +32,12 @@ import {
   setCsrfToken,
   registerSessionExpiredHandler,
 } from './utils/apiClient';
+import {
+  computeNextScheduledRun,
+  describeSchedule,
+  formatCountdown,
+  isScheduleDueNow,
+} from './utils/scheduleUtils';
 
 const INITIAL_DATABASES: DatabaseItem[] = [
   {
@@ -87,8 +95,23 @@ export default function App() {
   const [inactivityTimeoutMinutes, setInactivityTimeoutMinutes] = useState<number>(15);
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState<boolean>(false);
   const [showSecurityModal, setShowSecurityModal] = useState<boolean>(false);
-  const [bootstrapPending, setBootstrapPending] = useState<boolean>(false);
-  const [bootstrapUsernameHint, setBootstrapUsernameHint] = useState<string | null>(null);
+
+  // Automatic Backup Schedule State
+  const [backupSchedule, setBackupSchedule] = useState<BackupScheduleConfig>({
+    enabled: false,
+    frequency: 'daily',
+    timeOfDay: '02:00',
+    dayOfWeek: 0,
+    dayOfMonth: 1,
+    downloadMode: 'sequential',
+    targetDatabases: [],
+    lastRunAt: null,
+    lastRunKey: null,
+    lastRunStatus: null,
+    lastRunSummary: null,
+    updatedAt: null,
+    updatedBy: null,
+  });
 
   // Dashboard Navigation & Operational State
   const [activeTab, setActiveTab] = useState<AppTab>('backups');
@@ -118,6 +141,7 @@ export default function App() {
 
   const pauseRef = useRef<boolean>(false);
   const stopRef = useRef<boolean>(false);
+  const scheduledRunningRef = useRef<boolean>(false);
 
   // Sync dark class on <html>
   useEffect(() => {
@@ -184,8 +208,6 @@ export default function App() {
       if (data.inactivityTimeoutMinutes) {
         setInactivityTimeoutMinutes(data.inactivityTimeoutMinutes);
       }
-      setBootstrapPending(Boolean(data.bootstrapPending));
-      setBootstrapUsernameHint(data.bootstrapUsernameHint || null);
 
       if (data.authenticated && data.user) {
         setCurrentUser(data.user);
@@ -232,7 +254,7 @@ export default function App() {
     };
   }, [authStatus, inactivityTimeoutMinutes, handleSessionExpired]);
 
-  // Fetch Server Configuration ONLY after full authentication
+  // Fetch Server Configuration & Backup Schedule ONLY after full authentication
   const fetchConfig = useCallback(async () => {
     if (authStatus !== 'AUTHENTICATED') return;
     setLoadingConfig(true);
@@ -253,11 +275,27 @@ export default function App() {
     }
   }, [authStatus, addLog]);
 
+  const fetchSchedule = useCallback(async () => {
+    if (authStatus !== 'AUTHENTICATED') return;
+    try {
+      const res = await apiFetch('/api/schedule');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.schedule) {
+          setBackupSchedule(data.schedule);
+        }
+      }
+    } catch {
+      // ignore transient error
+    }
+  }, [authStatus]);
+
   useEffect(() => {
     if (authStatus === 'AUTHENTICATED') {
       fetchConfig();
+      fetchSchedule();
     }
-  }, [authStatus, fetchConfig]);
+  }, [authStatus, fetchConfig, fetchSchedule]);
 
   // Enforce RBAC on activeTab if user role is Manager
   useEffect(() => {
@@ -429,7 +467,8 @@ export default function App() {
 
   // Core Backup Execution for a Single Database
   const executeDatabaseBackup = async (
-    targetDb: DatabaseItem
+    targetDb: DatabaseItem,
+    skipBrowserDownload = false
   ): Promise<{ success: boolean; sql?: string; sizeBytes?: number; error?: string }> => {
     const startTime = Date.now();
 
@@ -479,19 +518,22 @@ export default function App() {
         sizeBytes = new Blob([sqlContent]).size;
       }
 
-      setDatabases((prev) =>
-        prev.map((d) => (d.id === targetDb.id ? { ...d, status: 'downloading', progress: 85 } : d))
-      );
-      addLog(
-        'info',
-        `Dumping completed (${formatBytes(sizeBytes)}). Triggering browser download...`,
-        targetDb.name
-      );
-
       const timestampStr = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `${targetDb.name}_backup_${timestampStr}.sql`;
-      const blob = new Blob([sqlContent], { type: 'application/sql' });
-      triggerBrowserDownload(blob, filename);
+
+      if (!skipBrowserDownload) {
+        setDatabases((prev) =>
+          prev.map((d) => (d.id === targetDb.id ? { ...d, status: 'downloading', progress: 85 } : d))
+        );
+        addLog(
+          'info',
+          `Dumping completed (${formatBytes(sizeBytes)}). Triggering browser download...`,
+          targetDb.name
+        );
+
+        const blob = new Blob([sqlContent], { type: 'application/sql' });
+        triggerBrowserDownload(blob, filename);
+      }
 
       const durationMs = Date.now() - startTime;
 
@@ -656,6 +698,180 @@ export default function App() {
     }
   };
 
+  // Save Automatic Backup Schedule
+  const handleSaveSchedule = async (
+    updated: Partial<BackupScheduleConfig>
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await apiFetch('/api/schedule', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { ok: false, error: data.error || 'Failed to update schedule.' };
+      }
+      setBackupSchedule(data.schedule);
+      addLog(
+        'info',
+        data.schedule.enabled
+          ? `Saved automatic backup schedule: ${describeSchedule(data.schedule)} (${data.schedule.downloadMode})`
+          : 'Automatic backup schedule paused.'
+      );
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Network error saving schedule.',
+      };
+    }
+  };
+
+  // Execute a Scheduled Backup Batch & Automatic Download
+  const runScheduledBackup = useCallback(
+    async (configToRun: BackupScheduleConfig, slotKey?: string) => {
+      if (scheduledRunningRef.current || isBatchRunning) return;
+
+      const targetNames =
+        configToRun.targetDatabases.length > 0
+          ? configToRun.targetDatabases
+          : databases.filter((d) => d.selected).map((d) => d.name);
+
+      if (targetNames.length === 0) {
+        addLog('warning', 'Scheduled backup skipped: no target databases selected.');
+        return;
+      }
+
+      scheduledRunningRef.current = true;
+      if (slotKey) {
+        setBackupSchedule((prev) => ({ ...prev, lastRunKey: slotKey }));
+      }
+
+      const targets: DatabaseItem[] = targetNames.map((name, idx) => {
+        const existing = databases.find((d) => d.name === name);
+        return (
+          existing || {
+            id: `sched_${Date.now()}_${idx}`,
+            name,
+            selected: true,
+            status: 'idle',
+            progress: 0,
+          }
+        );
+      });
+
+      setIsBatchRunning(true);
+      setIsPaused(false);
+      pauseRef.current = false;
+      stopRef.current = false;
+
+      const targetNameSet = new Set(targetNames);
+      setDatabases((prev) =>
+        prev.map((d) =>
+          targetNameSet.has(d.name) ? { ...d, status: 'queued', progress: 0, error: undefined } : d
+        )
+      );
+
+      addLog(
+        'info',
+        `Automatic ${configToRun.frequency} backup started for ${targets.length} database(s) [${configToRun.downloadMode} mode]...`
+      );
+
+      let completed = 0;
+      let failed = 0;
+      const completedPayloads: DatabaseItem[] = [];
+      const skipPerFileDownload = configToRun.downloadMode === 'zip';
+
+      for (let i = 0; i < targets.length; i++) {
+        if (stopRef.current) break;
+        const currentDb = targets[i];
+        setCurrentIndex(i);
+        setActiveDbId(currentDb.id);
+
+        const result = await executeDatabaseBackup(currentDb, skipPerFileDownload);
+        if (result.success && result.sql) {
+          completed++;
+          completedPayloads.push({
+            ...currentDb,
+            status: 'completed',
+            progress: 100,
+            sqlContent: result.sql,
+            sizeBytes: result.sizeBytes,
+          });
+        } else {
+          failed++;
+        }
+
+        if (i < targets.length - 1 && !stopRef.current && !skipPerFileDownload) {
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+      }
+
+      if (skipPerFileDownload && completedPayloads.length > 0 && !stopRef.current) {
+        try {
+          const zipBlob = await createZipBundle(completedPayloads);
+          const zipFilename = `truenas_auto_backup_${new Date().toISOString().replace(/[:.]/g, '-')}.zip`;
+          triggerBrowserDownload(zipBlob, zipFilename);
+          await apiFetch('/api/audit/zip-download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ databases: completedPayloads.map((d) => d.name) }),
+          }).catch(() => {});
+          addLog('success', `Automatic ZIP bundle downloaded: ${zipFilename}`);
+        } catch (err) {
+          addLog(
+            'error',
+            `Automatic ZIP generation failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+
+      setIsBatchRunning(false);
+      setActiveDbId(null);
+      stopRef.current = false;
+      scheduledRunningRef.current = false;
+
+      const runStatus: 'success' | 'partial' | 'failed' =
+        completed === targets.length ? 'success' : completed > 0 ? 'partial' : 'failed';
+      const summary = `Auto ${configToRun.frequency} backup (${configToRun.downloadMode}): ${completed}/${targets.length} succeeded (${failed} failed).`;
+      addLog(runStatus === 'failed' ? 'error' : 'success', summary);
+
+      try {
+        const recRes = await apiFetch('/api/schedule/run-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runKey: slotKey, status: runStatus, summary }),
+        });
+        if (recRes.ok) {
+          const recData = await recRes.json();
+          if (recData.schedule) {
+            setBackupSchedule(recData.schedule);
+          }
+        }
+      } catch {
+        // ignore telemetry persistence error
+      }
+    },
+    [databases, delayMs, isBatchRunning, addLog]
+  );
+
+  // Background 15s Scheduler Loop (while console is authenticated & active)
+  useEffect(() => {
+    if (authStatus !== 'AUTHENTICATED' || !backupSchedule.enabled) return;
+
+    const checkAndRun = () => {
+      if (scheduledRunningRef.current || isBatchRunning) return;
+      const { due, slotKey } = isScheduleDueNow(backupSchedule, new Date());
+      if (due) {
+        runScheduledBackup(backupSchedule, slotKey);
+      }
+    };
+
+    const timer = setInterval(checkAndRun, 15000);
+    return () => clearInterval(timer);
+  }, [authStatus, backupSchedule, isBatchRunning, runScheduledBackup]);
+
   // Auth loading state
   if (authStatus === 'LOADING') {
     return (
@@ -676,8 +892,6 @@ export default function App() {
         pendingUser={currentUser}
         sessionExpiredNotice={sessionExpiredNotice}
         inactivityTimeoutMinutes={inactivityTimeoutMinutes}
-        bootstrapPending={bootstrapPending}
-        bootstrapUsernameHint={bootstrapUsernameHint}
         isDark={isDark}
         toggleDark={toggleDark}
         onStepChange={(nextStatus, user, csrf) => {
@@ -690,7 +904,6 @@ export default function App() {
           setCsrfToken(csrf);
           setCurrentUser(user);
           setSessionExpiredNotice(false);
-          setBootstrapPending(false);
           setActiveTab('backups');
           setAuthStatus('AUTHENTICATED');
           addLog('success', `Authenticated as '${user.username}' (${user.role}) with TOTP MFA.`);
@@ -732,6 +945,16 @@ export default function App() {
           }`}
         >
           Database Queue
+        </button>
+        <button
+          onClick={() => setActiveTab('schedule')}
+          className={`px-3 py-1.5 rounded-md whitespace-nowrap ${
+            activeTab === 'schedule'
+              ? 'bg-emerald-600 text-white'
+              : 'text-slate-600 dark:text-slate-400'
+          }`}
+        >
+          Auto Schedule
         </button>
         {isIT && (
           <>
@@ -785,6 +1008,48 @@ export default function App() {
               setSimulationMode={setSimulationMode}
             />
 
+            {/* Compact Auto-Backup Schedule Strip */}
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl px-5 py-3.5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5 text-slate-600 dark:text-slate-300">
+                <Clock className={`w-4 h-4 shrink-0 ${backupSchedule.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`} />
+                <div>
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">
+                    Automatic Backup:
+                  </span>{' '}
+                  {backupSchedule.enabled ? (
+                    <>
+                      <span>{describeSchedule(backupSchedule)}</span>
+                      <span className="mx-1.5">·</span>
+                      <span className="font-mono uppercase">{backupSchedule.downloadMode}</span>
+                      {(() => {
+                        const nextRun = computeNextScheduledRun(backupSchedule);
+                        return nextRun ? (
+                          <>
+                            <span className="mx-1.5">·</span>
+                            <span className="text-emerald-600 dark:text-emerald-400 font-medium tabular-nums">
+                              Next in {formatCountdown(nextRun)}
+                            </span>
+                          </>
+                        ) : null;
+                      })()}
+                    </>
+                  ) : (
+                    <span className="text-slate-500 dark:text-slate-400">
+                      Not scheduled (manual trigger only)
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('schedule')}
+                className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline self-start sm:self-auto"
+              >
+                {backupSchedule.enabled ? 'Edit Auto Schedule' : 'Configure Daily / Weekly Schedule'}
+              </button>
+            </div>
+
             {(isBatchRunning || completedCount > 0) && (
               <BatchProgressCard
                 isBatchRunning={isBatchRunning}
@@ -818,6 +1083,18 @@ export default function App() {
 
             <LogDrawer logs={logs} onClearLogs={() => setLogs([])} />
           </div>
+        )}
+
+        {/* Tab Content: Automatic Schedule (IT & Manager) */}
+        {activeTab === 'schedule' && (
+          <AutoSchedulePanel
+            schedule={backupSchedule}
+            databases={databases}
+            isRunningBackup={isBatchRunning}
+            inactivityTimeoutMinutes={inactivityTimeoutMinutes}
+            onSaveSchedule={handleSaveSchedule}
+            onRunNow={(cfg) => runScheduledBackup(cfg)}
+          />
         )}
 
         {/* Tab Content: User Management (IT Full Admin Only) */}

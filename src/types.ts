@@ -112,3 +112,22 @@ export interface AuditLogRecord {
   userAgent: string;
   details: string;
 }
+
+export type ScheduleFrequency = 'hourly' | 'daily' | 'weekly' | 'monthly';
+export type ScheduleDownloadMode = 'sequential' | 'zip';
+
+export interface BackupScheduleConfig {
+  enabled: boolean;
+  frequency: ScheduleFrequency;
+  timeOfDay: string; // HH:MM (24-hour local time)
+  dayOfWeek: number; // 0 (Sun) - 6 (Sat) for weekly
+  dayOfMonth: number; // 1 - 28 for monthly
+  downloadMode: ScheduleDownloadMode;
+  targetDatabases: string[]; // empty = all currently selected databases in queue
+  lastRunAt: string | null;
+  lastRunKey: string | null;
+  lastRunStatus: 'success' | 'partial' | 'failed' | null;
+  lastRunSummary: string | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}

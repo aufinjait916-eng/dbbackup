@@ -87,8 +87,47 @@ export type AuditAction =
   | 'BACKUP_COMPLETED'
   | 'BACKUP_FAILED'
   | 'ZIP_BUNDLE_DOWNLOADED'
+  | 'SCHEDULE_UPDATED'
+  | 'SCHEDULED_BACKUP_RUN'
   | 'CSRF_REJECTED'
   | 'RBAC_DENIED';
+
+export type ScheduleFrequency = 'hourly' | 'daily' | 'weekly' | 'monthly';
+export type ScheduleDownloadMode = 'sequential' | 'zip';
+
+export interface BackupScheduleConfig {
+  enabled: boolean;
+  frequency: ScheduleFrequency;
+  timeOfDay: string;
+  dayOfWeek: number;
+  dayOfMonth: number;
+  downloadMode: ScheduleDownloadMode;
+  targetDatabases: string[];
+  lastRunAt: string | null;
+  lastRunKey: string | null;
+  lastRunStatus: 'success' | 'partial' | 'failed' | null;
+  lastRunSummary: string | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export function createDefaultBackupSchedule(): BackupScheduleConfig {
+  return {
+    enabled: false,
+    frequency: 'daily',
+    timeOfDay: '02:00',
+    dayOfWeek: 0,
+    dayOfMonth: 1,
+    downloadMode: 'sequential',
+    targetDatabases: [],
+    lastRunAt: null,
+    lastRunKey: null,
+    lastRunStatus: null,
+    lastRunSummary: null,
+    updatedAt: null,
+    updatedBy: null,
+  };
+}
 
 export interface AuditLogEntry {
   id: string;
@@ -108,6 +147,7 @@ interface AuthStoreData {
   users: StoredUser[];
   sessions: SessionRecord[];
   auditLogs: AuditLogEntry[];
+  backupSchedule?: BackupScheduleConfig;
 }
 
 export const SESSION_COOKIE_NAME = 'tn_pg_session';
@@ -243,6 +283,14 @@ export function validatePasswordStrength(password: string): string | null {
   return null;
 }
 
+export function isValidBcryptHash(hash: string | undefined | null): boolean {
+  return typeof hash === 'string' && /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(hash);
+}
+
+function authTrace(stage: string, meta: Record<string, unknown>) {
+  console.log(`[AUTH TRACE] ${new Date().toISOString()} ${stage} ${JSON.stringify(meta)}`);
+}
+
 function generateBackupCodes(count = 8): string[] {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const codes: string[] = [];
@@ -281,7 +329,12 @@ export function sanitizeUser(user: StoredUser): SanitizedUser {
 }
 
 class AuthStore {
-  private data: AuthStoreData = { users: [], sessions: [], auditLogs: [] };
+  private data: AuthStoreData = {
+    users: [],
+    sessions: [],
+    auditLogs: [],
+    backupSchedule: createDefaultBackupSchedule(),
+  };
   private ipFailures: Map<string, { count: number; firstAt: number; lockedUntil: number | null }> = new Map();
 
   constructor() {
@@ -299,13 +352,29 @@ class AuthStore {
           users: Array.isArray(parsed.users) ? parsed.users : [],
           sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
           auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [],
+          backupSchedule: parsed.backupSchedule
+            ? { ...createDefaultBackupSchedule(), ...parsed.backupSchedule }
+            : createDefaultBackupSchedule(),
         };
       } catch (err) {
         console.error('Failed to parse auth-store.json, initializing fresh store:', err);
-        this.data = { users: [], sessions: [], auditLogs: [] };
+        this.data = {
+          users: [],
+          sessions: [],
+          auditLogs: [],
+          backupSchedule: createDefaultBackupSchedule(),
+        };
       }
     }
     this.pruneExpiredSessions();
+    authTrace('STORE_LOADED', {
+      userCount: this.data.users.length,
+      activeSessions: this.data.sessions.length,
+      hasSessionSecretEnv: Boolean(process.env.SESSION_SECRET && process.env.SESSION_SECRET.trim().length >= 16),
+      hasItAdminPasswordEnv: Boolean(process.env.IT_ADMIN_PASSWORD),
+      hashAlgorithm: 'bcryptjs (bcrypt $2b$12$)',
+      totpAlgorithm: 'HMAC-SHA1 / 6 digits / 30s period / window +-2',
+    });
   }
 
   private persist() {
@@ -471,12 +540,31 @@ class AuthStore {
     identifier: string,
     password: string,
     ip: string,
-    userAgent: string
+    userAgent: string,
+    requestId = 'unknown'
   ):
     | { ok: true; user: StoredUser; session: SessionRecord; status: 'MFA_SETUP_REQUIRED' | 'MFA_REQUIRED' }
     | { ok: false; statusCode: number; error: string; retryAfterSec?: number } {
+    const trimmedIdentifier = identifier.trim();
+    const normalizedIdentifier = trimmedIdentifier.toLowerCase();
     const ipCheck = this.checkIpRateLimit(ip);
+
+    authTrace('LOGIN_PASSWORD_BEGIN', {
+      requestId,
+      ip,
+      identifierLength: trimmedIdentifier.length,
+      identifierHasInternalSpace: /\s/.test(trimmedIdentifier),
+      passwordLength: password.length,
+      passwordHasLeadingOrTrailingSpace: password !== password.trim(),
+      ipRateLimited: ipCheck.blocked,
+    });
+
     if (ipCheck.blocked) {
+      authTrace('LOGIN_REJECTED_IP_RATE_LIMIT', {
+        requestId,
+        ip,
+        retryAfterSec: ipCheck.retryAfterSec,
+      });
       this.appendAudit({
         action: 'RATE_LIMIT_BLOCKED',
         outcome: 'DENIED',
@@ -496,13 +584,20 @@ class AuthStore {
       };
     }
 
-    const user = this.findUserByIdentifier(identifier);
+    const user = this.findUserByIdentifier(normalizedIdentifier);
     const now = Date.now();
 
     if (!user) {
       this.recordIpFailure(ip);
       // Mitigate timing side-channel
       bcrypt.compareSync(password, '$2b$12$CwTycUXWue0Thq9StjUM0uJ8uX9iL2wE0R6JYq5gL5V8N6pT5K2mW');
+      authTrace('LOGIN_REJECTED_USER_NOT_FOUND', {
+        requestId,
+        ip,
+        normalizedLength: normalizedIdentifier.length,
+        hasSpace: /\s/.test(normalizedIdentifier),
+        registeredUsersCount: this.data.users.length,
+      });
       this.appendAudit({
         action: 'LOGIN_FAILED',
         outcome: 'FAILURE',
@@ -518,6 +613,11 @@ class AuthStore {
     }
 
     if (!user.isActive) {
+      authTrace('LOGIN_REJECTED_DISABLED', {
+        requestId,
+        userId: user.id,
+        username: user.username,
+      });
       this.appendAudit({
         action: 'LOGIN_FAILED',
         outcome: 'DENIED',
@@ -534,6 +634,12 @@ class AuthStore {
 
     if (user.lockedUntil && user.lockedUntil > now) {
       const retryAfterSec = Math.ceil((user.lockedUntil - now) / 1000);
+      authTrace('LOGIN_REJECTED_LOCKED', {
+        requestId,
+        userId: user.id,
+        username: user.username,
+        retryAfterSec,
+      });
       this.appendAudit({
         action: 'LOGIN_FAILED',
         outcome: 'DENIED',
@@ -559,7 +665,25 @@ class AuthStore {
       user.failedAttempts = 0;
     }
 
-    const passwordValid = bcrypt.compareSync(password, user.passwordHash);
+    const hashValidFormat = isValidBcryptHash(user.passwordHash);
+    const compareStartMs = Date.now();
+    const passwordValid = hashValidFormat && bcrypt.compareSync(password, user.passwordHash);
+    const compareDurationMs = Date.now() - compareStartMs;
+
+    authTrace('LOGIN_PASSWORD_VERIFY', {
+      requestId,
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      hashValidFormat,
+      hashPrefix: typeof user.passwordHash === 'string' ? user.passwordHash.slice(0, 7) : 'none',
+      hashLength: typeof user.passwordHash === 'string' ? user.passwordHash.length : 0,
+      passwordLastUpdatedAt: user.updatedAt,
+      compareDurationMs,
+      passwordValid,
+      priorFailedAttempts: user.failedAttempts,
+    });
+
     if (!passwordValid) {
       user.failedAttempts += 1;
       this.recordIpFailure(ip);
@@ -567,6 +691,12 @@ class AuthStore {
       if (user.failedAttempts >= MAX_FAILED_ATTEMPTS) {
         user.lockedUntil = now + LOCKOUT_DURATION_MS;
         this.persist();
+        authTrace('LOGIN_ACCOUNT_LOCKED', {
+          requestId,
+          userId: user.id,
+          username: user.username,
+          failedAttempts: user.failedAttempts,
+        });
         this.appendAudit({
           action: 'ACCOUNT_LOCKED',
           outcome: 'DENIED',
@@ -622,6 +752,15 @@ class AuthStore {
     this.persist();
 
     const status = !user.mfaEnabled || user.mustSetupMfa ? 'MFA_SETUP_REQUIRED' : 'MFA_REQUIRED';
+
+    authTrace('LOGIN_PASSWORD_OK', {
+      requestId,
+      userId: user.id,
+      username: user.username,
+      nextStep: status,
+      mfaEnabled: user.mfaEnabled,
+      mustSetupMfa: user.mustSetupMfa,
+    });
 
     this.appendAudit({
       action: 'LOGIN_PASSWORD_OK',
@@ -694,9 +833,11 @@ class AuthStore {
     user: StoredUser,
     otpCode: string,
     ip: string,
-    userAgent: string
+    userAgent: string,
+    requestId = 'unknown'
   ): { ok: true; backupCodes: string[]; session: SessionRecord } | { ok: false; statusCode: number; error: string } {
     if (!user.pendingTotpSecretEnc) {
+      authTrace('MFA_SETUP_NO_PENDING_SECRET', { requestId, userId: user.id, username: user.username });
       return { ok: false, statusCode: 400, error: 'MFA setup has not been initialized. Refresh QR code and try again.' };
     }
 
@@ -705,7 +846,22 @@ class AuthStore {
       return { ok: false, statusCode: 400, error: 'Enter a valid 6-digit authenticator code.' };
     }
 
-    const base32Secret = decryptSecret(user.pendingTotpSecretEnc);
+    let base32Secret = '';
+    try {
+      base32Secret = decryptSecret(user.pendingTotpSecretEnc);
+    } catch (err) {
+      authTrace('MFA_SETUP_DECRYPT_ERROR', {
+        requestId,
+        userId: user.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return {
+        ok: false,
+        statusCode: 500,
+        error: 'Unable to decrypt pending TOTP secret. Please re-initialize MFA setup.',
+      };
+    }
+
     const totp = new OTPAuth.TOTP({
       issuer: ISSUER_NAME,
       label: `${user.username} (${user.role})`,
@@ -715,7 +871,17 @@ class AuthStore {
       secret: OTPAuth.Secret.fromBase32(base32Secret),
     });
 
-    const delta = totp.validate({ token: cleanCode, window: 1 });
+    const delta = totp.validate({ token: cleanCode, window: 2 });
+    authTrace('MFA_SETUP_VERIFY', {
+      requestId,
+      userId: user.id,
+      username: user.username,
+      serverUtc: new Date().toISOString(),
+      totpPeriodStep: Math.floor(Date.now() / 30000),
+      delta,
+      matched: delta !== null,
+    });
+
     if (delta === null) {
       session.mfaAttempts += 1;
       this.appendAudit({
@@ -791,9 +957,11 @@ class AuthStore {
     codeInput: string,
     isBackupCode: boolean,
     ip: string,
-    userAgent: string
+    userAgent: string,
+    requestId = 'unknown'
   ): { ok: true; session: SessionRecord; usedBackupCode: boolean } | { ok: false; statusCode: number; error: string } {
     if (!user.mfaEnabled || !user.totpSecretEnc) {
+      authTrace('MFA_VERIFY_NOT_CONFIGURED', { requestId, userId: user.id, username: user.username });
       return { ok: false, statusCode: 400, error: 'MFA is not configured for this account.' };
     }
 
@@ -813,12 +981,37 @@ class AuthStore {
           }
         }
       }
+      authTrace('MFA_BACKUP_CODE_CHECK', {
+        requestId,
+        userId: user.id,
+        username: user.username,
+        normalizedLength: normalized.length,
+        verified,
+        backupCodesRemaining: user.backupCodeHashes.length,
+      });
     } else {
       const cleanCode = trimmed.replace(/\s+/g, '');
       if (!/^\d{6}$/.test(cleanCode)) {
         return { ok: false, statusCode: 400, error: 'Enter a valid 6-digit OTP code.' };
       }
-      const base32Secret = decryptSecret(user.totpSecretEnc);
+
+      let base32Secret = '';
+      try {
+        base32Secret = decryptSecret(user.totpSecretEnc);
+      } catch (err) {
+        authTrace('MFA_VERIFY_DECRYPT_ERROR', {
+          requestId,
+          userId: user.id,
+          username: user.username,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return {
+          ok: false,
+          statusCode: 500,
+          error: 'Unable to decrypt stored TOTP secret (check SESSION_SECRET consistency or ask an IT admin to reset MFA).',
+        };
+      }
+
       const totp = new OTPAuth.TOTP({
         issuer: ISSUER_NAME,
         label: `${user.username} (${user.role})`,
@@ -827,8 +1020,18 @@ class AuthStore {
         period: 30,
         secret: OTPAuth.Secret.fromBase32(base32Secret),
       });
-      const delta = totp.validate({ token: cleanCode, window: 1 });
+      const delta = totp.validate({ token: cleanCode, window: 2 });
       verified = delta !== null;
+
+      authTrace('MFA_TOTP_CHECK', {
+        requestId,
+        userId: user.id,
+        username: user.username,
+        serverUtc: new Date().toISOString(),
+        totpPeriodStep: Math.floor(Date.now() / 30000),
+        delta,
+        verified,
+      });
     }
 
     if (!verified) {
@@ -1305,6 +1508,119 @@ class AuthStore {
     });
 
     return { ok: true };
+  }
+
+  public getBackupSchedule(): BackupScheduleConfig {
+    if (!this.data.backupSchedule) {
+      this.data.backupSchedule = createDefaultBackupSchedule();
+    }
+    return { ...this.data.backupSchedule };
+  }
+
+  public updateBackupSchedule(
+    input: Partial<BackupScheduleConfig>,
+    actor: StoredUser,
+    ip: string,
+    userAgent: string
+  ): { ok: true; schedule: BackupScheduleConfig } | { ok: false; statusCode: number; error: string } {
+    const current = this.getBackupSchedule();
+    const validFrequencies: ScheduleFrequency[] = ['hourly', 'daily', 'weekly', 'monthly'];
+    const validModes: ScheduleDownloadMode[] = ['sequential', 'zip'];
+
+    const frequency = input.frequency ?? current.frequency;
+    if (!validFrequencies.includes(frequency)) {
+      return { ok: false, statusCode: 400, error: 'Invalid schedule frequency.' };
+    }
+
+    const timeOfDay = typeof input.timeOfDay === 'string' ? input.timeOfDay.trim() : current.timeOfDay;
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(timeOfDay)) {
+      return { ok: false, statusCode: 400, error: 'Time of day must be in HH:MM (24-hour) format.' };
+    }
+
+    const dayOfWeek = input.dayOfWeek !== undefined ? Number(input.dayOfWeek) : current.dayOfWeek;
+    if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+      return { ok: false, statusCode: 400, error: 'Day of week must be between 0 (Sunday) and 6 (Saturday).' };
+    }
+
+    const dayOfMonth = input.dayOfMonth !== undefined ? Number(input.dayOfMonth) : current.dayOfMonth;
+    if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 28) {
+      return { ok: false, statusCode: 400, error: 'Day of month must be between 1 and 28.' };
+    }
+
+    const downloadMode = input.downloadMode ?? current.downloadMode;
+    if (!validModes.includes(downloadMode)) {
+      return { ok: false, statusCode: 400, error: 'Invalid download mode.' };
+    }
+
+    const targetDatabases = Array.isArray(input.targetDatabases)
+      ? input.targetDatabases.filter((d): d is string => typeof d === 'string' && /^[a-zA-Z0-9_\-.]+$/.test(d))
+      : current.targetDatabases;
+
+    const updated: BackupScheduleConfig = {
+      ...current,
+      enabled: typeof input.enabled === 'boolean' ? input.enabled : current.enabled,
+      frequency,
+      timeOfDay,
+      dayOfWeek,
+      dayOfMonth,
+      downloadMode,
+      targetDatabases,
+      updatedAt: new Date().toISOString(),
+      updatedBy: actor.username,
+    };
+
+    this.data.backupSchedule = updated;
+    this.persist();
+
+    this.appendAudit({
+      action: 'SCHEDULE_UPDATED',
+      outcome: 'SUCCESS',
+      actorId: actor.id,
+      actorUsername: actor.username,
+      actorRole: actor.role,
+      target: updated.frequency,
+      ip,
+      userAgent,
+      details: `${updated.enabled ? 'Enabled' : 'Disabled'} automatic ${updated.frequency} backup at ${updated.timeOfDay} (${updated.downloadMode} download, ${updated.targetDatabases.length > 0 ? updated.targetDatabases.length + ' DB(s)' : 'selected queue DBs'}).`,
+    });
+
+    return { ok: true, schedule: updated };
+  }
+
+  public recordScheduledRun(
+    payload: {
+      runKey?: string;
+      status: 'success' | 'partial' | 'failed';
+      summary: string;
+    },
+    actor: StoredUser,
+    ip: string,
+    userAgent: string
+  ): BackupScheduleConfig {
+    const current = this.getBackupSchedule();
+    const updated: BackupScheduleConfig = {
+      ...current,
+      lastRunAt: new Date().toISOString(),
+      lastRunKey: typeof payload.runKey === 'string' ? payload.runKey : current.lastRunKey,
+      lastRunStatus: payload.status,
+      lastRunSummary: payload.summary,
+    };
+    this.data.backupSchedule = updated;
+    this.persist();
+
+    this.appendAudit({
+      action: 'SCHEDULED_BACKUP_RUN',
+      outcome: payload.status === 'failed' ? 'FAILURE' : 'SUCCESS',
+      actorId: actor.id,
+      actorUsername: actor.username,
+      actorRole: actor.role,
+      target: current.frequency,
+      ip,
+      userAgent,
+      details: payload.summary,
+    });
+
+    return updated;
   }
 }
 

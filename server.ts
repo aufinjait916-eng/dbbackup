@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { Client } from 'pg';
@@ -99,6 +100,15 @@ function verifyCsrf(req: AuthenticatedRequest, res: Response, next: NextFunction
 
   if (req.authSession) {
     if (!token || !timingSafeEqualStr(token, req.authSession.csrfToken)) {
+      console.warn(
+        `[AUTH TRACE] ${new Date().toISOString()} CSRF_SESSION_REJECTED ${JSON.stringify({
+          path: req.path,
+          hasHeaderToken: Boolean(token),
+          hasSessionCookie: true,
+          userId: req.authUser?.id || null,
+          ip: getClientIp(req),
+        })}`
+      );
       authStore.appendAudit({
         action: 'CSRF_REJECTED',
         outcome: 'DENIED',
@@ -117,7 +127,21 @@ function verifyCsrf(req: AuthenticatedRequest, res: Response, next: NextFunction
 
   // Pre-auth CSRF validation (used for /api/auth/login)
   const cookieToken = req.cookies?.[PRE_CSRF_COOKIE_NAME] as string | undefined;
-  if (!token || !cookieToken || !timingSafeEqualStr(token, cookieToken) || !verifyPreAuthCsrfToken(token)) {
+  const tokensMatch = Boolean(token && cookieToken && timingSafeEqualStr(token, cookieToken));
+  const signatureValid = tokensMatch && verifyPreAuthCsrfToken(token);
+  if (!token || !cookieToken || !tokensMatch || !signatureValid) {
+    console.warn(
+      `[AUTH TRACE] ${new Date().toISOString()} CSRF_PREAUTH_REJECTED ${JSON.stringify({
+        path: req.path,
+        hasHeaderToken: Boolean(token),
+        hasPreCsrfCookie: Boolean(cookieToken),
+        tokensMatch,
+        signatureValid,
+        origin: req.headers['origin'] || null,
+        xForwardedProto: req.headers['x-forwarded-proto'] || null,
+        ip: getClientIp(req),
+      })}`
+    );
     authStore.appendAudit({
       action: 'CSRF_REJECTED',
       outcome: 'DENIED',
@@ -210,14 +234,11 @@ app.get('/api/auth/me', (req: AuthenticatedRequest, res: Response) => {
   if (!req.authSession || !req.authUser) {
     const preCsrf = createPreAuthCsrfToken();
     setPreAuthCsrfCookie(res, req, preCsrf);
-    const bootstrap = authStore.getBootstrapInfo();
     return res.json({
       authenticated: false,
       status: 'UNAUTHENTICATED',
       csrfToken: preCsrf,
       inactivityTimeoutMinutes: timeoutMinutes,
-      bootstrapPending: bootstrap.bootstrapPending,
-      bootstrapUsernameHint: bootstrap.bootstrapUsernameHint,
     });
   }
 
@@ -239,19 +260,41 @@ app.get('/api/auth/me', (req: AuthenticatedRequest, res: Response) => {
 
 // Step 1: Login with username/email + password (public signup is intentionally disabled)
 app.post('/api/auth/login', verifyCsrf, (req: AuthenticatedRequest, res: Response) => {
+  const requestId = crypto.randomBytes(6).toString('hex');
   const { username, password } = req.body || {};
+  const ip = getClientIp(req);
+  const ua = String(req.headers['user-agent'] || 'unknown');
+
+  console.log(
+    `[AUTH TRACE] ${new Date().toISOString()} HTTP_POST_LOGIN ${JSON.stringify({
+      requestId,
+      ip,
+      hasUsername: typeof username === 'string' && username.trim().length > 0,
+      hasPassword: typeof password === 'string' && password.length > 0,
+      hasPreCsrfCookie: Boolean(req.cookies?.[PRE_CSRF_COOKIE_NAME]),
+      hasExistingSessionCookie: Boolean(req.cookies?.[SESSION_COOKIE_NAME]),
+      origin: req.headers['origin'] || null,
+    })}`
+  );
+
   if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
     return res.status(400).json({ error: 'Username/email and password are required.' });
   }
 
-  const ip = getClientIp(req);
-  const ua = String(req.headers['user-agent'] || 'unknown');
-  const result = authStore.authenticatePassword(username, password, ip, ua);
+  const result = authStore.authenticatePassword(username, password, ip, ua, requestId);
 
   if (!result.ok) {
     if (result.retryAfterSec) {
       res.setHeader('Retry-After', String(result.retryAfterSec));
     }
+    console.warn(
+      `[AUTH TRACE] ${new Date().toISOString()} HTTP_POST_LOGIN_RESULT ${JSON.stringify({
+        requestId,
+        statusCode: result.statusCode,
+        ok: false,
+        retryAfterSec: result.retryAfterSec || null,
+      })}`
+    );
     return res.status(result.statusCode).json({
       error: result.error,
       retryAfterSec: result.retryAfterSec,
@@ -260,6 +303,15 @@ app.post('/api/auth/login', verifyCsrf, (req: AuthenticatedRequest, res: Respons
 
   // Set pending-MFA HttpOnly session cookie
   setSessionCookie(res, req, result.session.id, false);
+  console.log(
+    `[AUTH TRACE] ${new Date().toISOString()} HTTP_POST_LOGIN_RESULT ${JSON.stringify({
+      requestId,
+      statusCode: 200,
+      ok: true,
+      nextStep: result.status,
+      userId: result.user.id,
+    })}`
+  );
 
   return res.json({
     status: result.status,
@@ -306,12 +358,14 @@ app.post('/api/auth/mfa/setup/verify', requirePendingMfa, verifyCsrf, (req: Auth
     return res.status(400).json({ error: '6-digit OTP code is required.' });
   }
 
+  const requestId = crypto.randomBytes(6).toString('hex');
   const result = authStore.completeMfaSetup(
     session,
     user,
     code,
     getClientIp(req),
-    String(req.headers['user-agent'] || 'unknown')
+    String(req.headers['user-agent'] || 'unknown'),
+    requestId
   );
 
   if (!result.ok) {
@@ -344,13 +398,15 @@ app.post('/api/auth/mfa/verify', requirePendingMfa, verifyCsrf, (req: Authentica
     return res.status(400).json({ error: 'Verification code is required.' });
   }
 
+  const requestId = crypto.randomBytes(6).toString('hex');
   const result = authStore.verifyMfaLogin(
     session,
     user,
     code,
     Boolean(isBackupCode),
     getClientIp(req),
-    String(req.headers['user-agent'] || 'unknown')
+    String(req.headers['user-agent'] || 'unknown'),
+    requestId
   );
 
   if (!result.ok) {
@@ -497,6 +553,52 @@ app.post(
 app.get('/api/audit-logs', requireAuth, requireRole('IT'), (req: AuthenticatedRequest, res: Response) => {
   const limit = Math.min(parseInt(String(req.query.limit || '300'), 10) || 300, 1000);
   return res.json({ logs: authStore.getAuditLogs(limit) });
+});
+
+// ==============================================================================
+// Automatic Backup Schedule Routes (Authenticated IT & Manager)
+// ==============================================================================
+
+app.get('/api/schedule', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+  return res.json({ schedule: authStore.getBackupSchedule() });
+});
+
+app.put('/api/schedule', requireAuth, verifyCsrf, (req: AuthenticatedRequest, res: Response) => {
+  const result = authStore.updateBackupSchedule(
+    req.body || {},
+    req.authUser!,
+    getClientIp(req),
+    String(req.headers['user-agent'] || 'unknown')
+  );
+
+  if (!result.ok) {
+    return res.status(result.statusCode).json({ error: result.error });
+  }
+
+  return res.json({ schedule: result.schedule });
+});
+
+app.post('/api/schedule/run-record', requireAuth, verifyCsrf, (req: AuthenticatedRequest, res: Response) => {
+  const { runKey, status, summary } = req.body || {};
+  const validStatuses = ['success', 'partial', 'failed'];
+  const normalizedStatus = validStatuses.includes(status) ? status : 'success';
+  const cleanSummary =
+    typeof summary === 'string' && summary.trim().length > 0
+      ? summary.trim().slice(0, 500)
+      : 'Scheduled backup completed.';
+
+  const schedule = authStore.recordScheduledRun(
+    {
+      runKey: typeof runKey === 'string' ? runKey : undefined,
+      status: normalizedStatus,
+      summary: cleanSummary,
+    },
+    req.authUser!,
+    getClientIp(req),
+    String(req.headers['user-agent'] || 'unknown')
+  );
+
+  return res.json({ schedule });
 });
 
 // ==============================================================================

@@ -67,6 +67,8 @@ export const AuditLogPanel: React.FC = () => {
           'BACKUP_COMPLETED',
           'BACKUP_FAILED',
           'ZIP_BUNDLE_DOWNLOADED',
+          'SCHEDULE_UPDATED',
+          'SCHEDULED_BACKUP_RUN',
         ].includes(entry.action)
       ) {
         return false;

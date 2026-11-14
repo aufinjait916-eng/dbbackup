@@ -2,7 +2,7 @@ import React from 'react';
 import { Database, ShieldCheck, Sun, Moon, LogOut, UserCheck } from 'lucide-react';
 import { AuthUser } from '../types';
 
-export type AppTab = 'backups' | 'server' | 'deployment' | 'users' | 'audit';
+export type AppTab = 'backups' | 'schedule' | 'server' | 'deployment' | 'users' | 'audit';
 
 interface HeaderProps {
   activeTab: AppTab;
@@ -54,6 +54,17 @@ export const Header: React.FC<HeaderProps> = ({
           }`}
         >
           Database Queue
+        </button>
+
+        <button
+          onClick={() => setActiveTab('schedule')}
+          className={`hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 ${
+            activeTab === 'schedule'
+              ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+              : ''
+          }`}
+        >
+          Auto Schedule
         </button>
 
         {isIT && (
