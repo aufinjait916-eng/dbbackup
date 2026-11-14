@@ -61,3 +61,54 @@ export interface LogEntry {
   message: string;
   database?: string;
 }
+
+export type UserRole = 'IT' | 'Manager';
+
+export type AuthFlowStatus =
+  | 'LOADING'
+  | 'UNAUTHENTICATED'
+  | 'MFA_SETUP_REQUIRED'
+  | 'MFA_REQUIRED'
+  | 'AUTHENTICATED';
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  role: UserRole;
+  isActive: boolean;
+  mfaEnabled: boolean;
+  mustSetupMfa: boolean;
+  backupCodesRemaining: number;
+  failedAttempts: number;
+  isLocked: boolean;
+  lockedUntil: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt: string | null;
+  createdBy: string;
+}
+
+export interface AuthSessionState {
+  authenticated: boolean;
+  status: AuthFlowStatus;
+  user: AuthUser | null;
+  csrfToken: string;
+  inactivityTimeoutMinutes: number;
+  lastActivityAt?: string;
+}
+
+export interface AuditLogRecord {
+  id: string;
+  timestamp: string;
+  action: string;
+  outcome: 'SUCCESS' | 'FAILURE' | 'DENIED';
+  actorId: string | null;
+  actorUsername: string;
+  actorRole: UserRole | 'SYSTEM' | 'ANONYMOUS';
+  target: string | null;
+  ip: string;
+  userAgent: string;
+  details: string;
+}

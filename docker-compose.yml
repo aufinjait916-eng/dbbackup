@@ -17,6 +17,14 @@ services:
       - POSTGRES_DATABASE=postgres
       - POSTGRES_SSL=false
       - NODE_ENV=production
-    # Optional persistent storage for backups if server-side archiving is enabled
-    # volumes:
-    #   - /mnt/tank/backups/postgres:/backups
+      # First-boot IT Admin Bootstrap & Security
+      - IT_ADMIN_USERNAME=it-admin
+      - IT_ADMIN_EMAIL=it-admin@truenas.local
+      - IT_ADMIN_PASSWORD=ChangeMe_TrueNAS_Admin_2026!
+      - SESSION_SECRET=change-this-to-a-64-char-random-hex-string
+      - SESSION_INACTIVITY_MINUTES=15
+      - AUTH_DATA_DIR=/app/data
+    volumes:
+      # Persist user accounts, TOTP MFA secrets, and audit logs across container restarts
+      - ./data:/app/data
+

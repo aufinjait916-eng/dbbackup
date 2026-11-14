@@ -36,6 +36,10 @@ RUN npm install --omit=dev --legacy-peer-deps && npm install -g tsx
 # Copy built frontend assets and server entry point
 COPY --from=builder /app/dist ./dist
 COPY server.ts ./server.ts
+COPY server ./server
+
+# Create persistent data directory for auth store & audit logs
+RUN mkdir -p /app/data && chown -R node:node /app/data
 
 # Run as non-root user for security
 USER node
@@ -43,6 +47,6 @@ USER node
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/api/config || exit 1
+  CMD curl -f http://localhost:3000/api/health || exit 1
 
 CMD ["tsx", "server.ts"]

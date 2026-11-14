@@ -1,18 +1,35 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { DatabaseItem, ServerConfig, ConnectionTestResult, LogEntry } from './types';
-import { Header } from './components/Header';
+import { RefreshCw } from 'lucide-react';
+import {
+  DatabaseItem,
+  ServerConfig,
+  ConnectionTestResult,
+  LogEntry,
+  AuthFlowStatus,
+  AuthUser,
+} from './types';
+import { Header, AppTab } from './components/Header';
 import { ServerEnvBanner } from './components/ServerEnvBanner';
 import { DatabaseQueueTable } from './components/DatabaseQueueTable';
 import { BatchProgressCard } from './components/BatchProgressCard';
 import { SqlPreviewModal } from './components/SqlPreviewModal';
 import { WorkflowDocsPanel } from './components/WorkflowDocsPanel';
 import { LogDrawer } from './components/LogDrawer';
+import { LoginDashboard } from './components/LoginDashboard';
+import { UserManagementPanel } from './components/UserManagementPanel';
+import { AuditLogPanel } from './components/AuditLogPanel';
+import { AccountSecurityModal } from './components/AccountSecurityModal';
 import {
   triggerBrowserDownload,
   createZipBundle,
   generateClientSampleSql,
   formatBytes,
 } from './utils/backupEngine';
+import {
+  apiFetch,
+  setCsrfToken,
+  registerSessionExpiredHandler,
+} from './utils/apiClient';
 
 const INITIAL_DATABASES: DatabaseItem[] = [
   {
@@ -53,7 +70,7 @@ const INITIAL_DATABASES: DatabaseItem[] = [
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'backups' | 'server' | 'deployment'>('backups');
+  // Theme state
   const [isDark, setIsDark] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       return (
@@ -64,9 +81,20 @@ export default function App() {
     return false;
   });
 
+  // Authentication & MFA state
+  const [authStatus, setAuthStatus] = useState<AuthFlowStatus>('LOADING');
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [inactivityTimeoutMinutes, setInactivityTimeoutMinutes] = useState<number>(15);
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<boolean>(false);
+  const [showSecurityModal, setShowSecurityModal] = useState<boolean>(false);
+  const [bootstrapPending, setBootstrapPending] = useState<boolean>(false);
+  const [bootstrapUsernameHint, setBootstrapUsernameHint] = useState<string | null>(null);
+
+  // Dashboard Navigation & Operational State
+  const [activeTab, setActiveTab] = useState<AppTab>('backups');
   const [databases, setDatabases] = useState<DatabaseItem[]>(INITIAL_DATABASES);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
-  const [loadingConfig, setLoadingConfig] = useState<boolean>(true);
+  const [loadingConfig, setLoadingConfig] = useState<boolean>(false);
   const [discovering, setDiscovering] = useState<boolean>(false);
   const [simulationMode, setSimulationMode] = useState<boolean>(false);
 
@@ -84,7 +112,7 @@ export default function App() {
       id: 'init_1',
       timestamp: new Date().toISOString(),
       type: 'info',
-      message: 'TrueNAS PostgreSQL Backup Manager ready. Load databases from JSON or discover from server.',
+      message: 'TrueNAS PostgreSQL Backup Manager ready. Discover databases from server or add manually.',
     },
   ]);
 
@@ -114,51 +142,155 @@ export default function App() {
           message,
           database,
         },
-        ...prev.slice(0, 99), // keep latest 100
+        ...prev.slice(0, 99),
       ]);
     },
     []
   );
 
-  // Fetch Server Configuration on mount
+  // Handle session expiration cleanly
+  const handleSessionExpired = useCallback(async () => {
+    stopRef.current = true;
+    setIsBatchRunning(false);
+    setActiveDbId(null);
+    setShowSecurityModal(false);
+    setPreviewDb(null);
+    setCurrentUser(null);
+    setServerConfig(null);
+    setSessionExpiredNotice(true);
+    setAuthStatus('UNAUTHENTICATED');
+
+    try {
+      const res = await fetch('/api/auth/csrf', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setCsrfToken(data.csrfToken || '');
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    registerSessionExpiredHandler(handleSessionExpired);
+  }, [handleSessionExpired]);
+
+  // Check current session status on mount
+  const checkAuthSession = useCallback(async () => {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      const data = await res.json();
+      setCsrfToken(data.csrfToken || '');
+      if (data.inactivityTimeoutMinutes) {
+        setInactivityTimeoutMinutes(data.inactivityTimeoutMinutes);
+      }
+      setBootstrapPending(Boolean(data.bootstrapPending));
+      setBootstrapUsernameHint(data.bootstrapUsernameHint || null);
+
+      if (data.authenticated && data.user) {
+        setCurrentUser(data.user);
+        setAuthStatus('AUTHENTICATED');
+      } else if (data.status === 'MFA_SETUP_REQUIRED' || data.status === 'MFA_REQUIRED') {
+        setCurrentUser(data.user || null);
+        setAuthStatus(data.status);
+      } else {
+        setCurrentUser(null);
+        setAuthStatus('UNAUTHENTICATED');
+      }
+    } catch {
+      setAuthStatus('UNAUTHENTICATED');
+    }
+  }, []);
+
+  useEffect(() => {
+    checkAuthSession();
+  }, [checkAuthSession]);
+
+  // Client-side inactivity auto-lock synced with server timeout
+  useEffect(() => {
+    if (authStatus !== 'AUTHENTICATED') return;
+
+    let idleTimer: ReturnType<typeof setTimeout>;
+    const timeoutMs = inactivityTimeoutMinutes * 60 * 1000;
+
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        apiFetch('/api/auth/logout', { method: 'POST' }).finally(() => {
+          handleSessionExpired();
+        });
+      }, timeoutMs);
+    };
+
+    const events = ['mousedown', 'keydown', 'scroll', 'touchstart'];
+    events.forEach((evt) => window.addEventListener(evt, resetIdleTimer, { passive: true }));
+    resetIdleTimer();
+
+    return () => {
+      clearTimeout(idleTimer);
+      events.forEach((evt) => window.removeEventListener(evt, resetIdleTimer));
+    };
+  }, [authStatus, inactivityTimeoutMinutes, handleSessionExpired]);
+
+  // Fetch Server Configuration ONLY after full authentication
   const fetchConfig = useCallback(async () => {
+    if (authStatus !== 'AUTHENTICATED') return;
     setLoadingConfig(true);
     try {
-      const res = await fetch('/api/config');
+      const res = await apiFetch('/api/config');
       if (res.ok) {
         const data = await res.json();
         setServerConfig(data);
         addLog(
           'info',
-          `Server environment detected: ${data.host}:${data.port} (${data.detectedEnvKeys?.length || 0} env variables found)`
+          `Server environment detected: ${data.host}:${data.port}`
         );
       }
     } catch {
-      // If running client-only (e.g. static GitHub Pages), default to simulation mode
-      setSimulationMode(true);
-      setServerConfig({
-        configured: false,
-        host: 'truenas.local',
-        port: 5432,
-        user: 'postgres',
-        defaultDb: 'postgres',
-        sslEnabled: false,
-        hasPassword: true,
-        detectedEnvKeys: ['POSTGRES_HOST', 'POSTGRES_USER', 'POSTGRES_PASSWORD'],
-        truenasPlatform: true,
-      });
-      addLog(
-        'warning',
-        'Backend server not reachable directly (running in browser / static mode). Demo / Sandbox mode activated.'
-      );
+      addLog('warning', 'Unable to reach /api/config endpoint.');
     } finally {
       setLoadingConfig(false);
     }
-  }, [addLog]);
+  }, [authStatus, addLog]);
 
   useEffect(() => {
-    fetchConfig();
-  }, [fetchConfig]);
+    if (authStatus === 'AUTHENTICATED') {
+      fetchConfig();
+    }
+  }, [authStatus, fetchConfig]);
+
+  // Enforce RBAC on activeTab if user role is Manager
+  useEffect(() => {
+    if (
+      currentUser?.role === 'Manager' &&
+      ['users', 'audit', 'deployment', 'server'].includes(activeTab)
+    ) {
+      setActiveTab('backups');
+    }
+  }, [currentUser, activeTab]);
+
+  // Logout action
+  const handleLogout = async () => {
+    stopRef.current = true;
+    setIsBatchRunning(false);
+    setActiveDbId(null);
+    setShowSecurityModal(false);
+    setPreviewDb(null);
+
+    try {
+      const res = await apiFetch('/api/auth/logout', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      setCsrfToken(data.csrfToken || '');
+    } catch {
+      setCsrfToken('');
+    }
+
+    setCurrentUser(null);
+    setServerConfig(null);
+    setSessionExpiredNotice(false);
+    setActiveTab('backups');
+    setAuthStatus('UNAUTHENTICATED');
+  };
 
   // Test Server Connection
   const handleTestConnection = async (): Promise<ConnectionTestResult> => {
@@ -178,7 +310,7 @@ export default function App() {
     }
 
     try {
-      const res = await fetch('/api/test-connection', {
+      const res = await apiFetch('/api/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -187,7 +319,7 @@ export default function App() {
       if (data.success) {
         addLog('success', `Connection test passed (${data.latencyMs}ms): ${data.version}`);
       } else {
-        addLog('error', `Connection test failed: ${data.message}`);
+        addLog('error', `Connection test failed: ${data.message || data.error}`);
       }
       return data;
     } catch (err) {
@@ -233,23 +365,25 @@ export default function App() {
     }
 
     try {
-      const res = await fetch('/api/databases');
+      const res = await apiFetch('/api/databases');
       const data = await res.json();
       if (data.success && Array.isArray(data.databases)) {
-        const discovered = data.databases.map((db: { name: string; size_bytes?: number }, i: number) => ({
-          id: `db_${Date.now()}_${i}`,
-          name: db.name,
-          selected: true,
-          status: 'idle' as const,
-          progress: 0,
-          sizeBytes: db.size_bytes,
-          sizePretty: db.size_bytes ? formatBytes(db.size_bytes) : undefined,
-        }));
+        const discovered = data.databases.map(
+          (db: { name: string; size_bytes?: number }, i: number) => ({
+            id: `db_${Date.now()}_${i}`,
+            name: db.name,
+            selected: true,
+            status: 'idle' as const,
+            progress: 0,
+            sizeBytes: db.size_bytes,
+            sizePretty: db.size_bytes ? formatBytes(db.size_bytes) : undefined,
+          })
+        );
         setDatabases(discovered);
         addLog('success', `Discovered ${discovered.length} databases from PostgreSQL catalog`);
         setActiveTab('backups');
       } else {
-        addLog('error', `Database discovery error: ${data.message || 'Unknown response'}`);
+        addLog('error', `Database discovery error: ${data.message || data.error || 'Unknown response'}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -299,7 +433,6 @@ export default function App() {
   ): Promise<{ success: boolean; sql?: string; sizeBytes?: number; error?: string }> => {
     const startTime = Date.now();
 
-    // 1. Connecting state
     setDatabases((prev) =>
       prev.map((d) => (d.id === targetDb.id ? { ...d, status: 'connecting', progress: 20 } : d))
     );
@@ -307,7 +440,6 @@ export default function App() {
 
     await new Promise((r) => setTimeout(r, 200));
 
-    // 2. Dumping state
     setDatabases((prev) =>
       prev.map((d) => (d.id === targetDb.id ? { ...d, status: 'dumping', progress: 50 } : d))
     );
@@ -318,11 +450,21 @@ export default function App() {
 
     try {
       if (simulationMode) {
-        await new Promise((r) => setTimeout(r, 500));
-        sqlContent = generateClientSampleSql(targetDb.name);
+        // Call server in simulation mode so the action is properly audited & authenticated
+        const res = await apiFetch(`/api/backup/${encodeURIComponent(targetDb.name)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ simulation: true }),
+        });
+
+        if (res.ok) {
+          sqlContent = await res.text();
+        } else {
+          sqlContent = generateClientSampleSql(targetDb.name);
+        }
         sizeBytes = new Blob([sqlContent]).size;
       } else {
-        const res = await fetch(`/api/backup/${encodeURIComponent(targetDb.name)}`, {
+        const res = await apiFetch(`/api/backup/${encodeURIComponent(targetDb.name)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ simulation: false }),
@@ -337,11 +479,14 @@ export default function App() {
         sizeBytes = new Blob([sqlContent]).size;
       }
 
-      // 3. Trigger browser download
       setDatabases((prev) =>
         prev.map((d) => (d.id === targetDb.id ? { ...d, status: 'downloading', progress: 85 } : d))
       );
-      addLog('info', `Dumping completed (${formatBytes(sizeBytes)}). Triggering browser download...`, targetDb.name);
+      addLog(
+        'info',
+        `Dumping completed (${formatBytes(sizeBytes)}). Triggering browser download...`,
+        targetDb.name
+      );
 
       const timestampStr = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `${targetDb.name}_backup_${timestampStr}.sql`;
@@ -350,7 +495,6 @@ export default function App() {
 
       const durationMs = Date.now() - startTime;
 
-      // 4. Completed state
       setDatabases((prev) =>
         prev.map((d) =>
           d.id === targetDb.id
@@ -395,7 +539,6 @@ export default function App() {
     }
   };
 
-  // Backup a single database on user button click
   const handleBackupSingle = async (id: string) => {
     const target = databases.find((d) => d.id === id);
     if (!target || isBatchRunning) return;
@@ -405,17 +548,16 @@ export default function App() {
     setActiveDbId(null);
   };
 
-  // Start Batch Sequential Backup & Download
   const handleStartBatchBackup = async () => {
     const targets = databases.filter((d) => d.selected);
     if (targets.length === 0 || isBatchRunning) return;
 
+    setActiveTab('backups');
     setIsBatchRunning(true);
     setIsPaused(false);
     pauseRef.current = false;
     stopRef.current = false;
 
-    // Reset status of selected targets to queued
     setDatabases((prev) =>
       prev.map((d) => (d.selected ? { ...d, status: 'queued', progress: 0, error: undefined } : d))
     );
@@ -434,7 +576,6 @@ export default function App() {
         break;
       }
 
-      // Check pause
       while (pauseRef.current && !stopRef.current) {
         await new Promise((r) => setTimeout(r, 400));
       }
@@ -452,11 +593,10 @@ export default function App() {
         failed++;
       }
 
-      // Polite throttling delay between sequential downloads
       if (i < targets.length - 1 && !stopRef.current) {
         addLog(
           'info',
-          `Waiting ${(delayMs / 1000).toFixed(1)}s before starting next database backup to ensure browser download acceptance...`,
+          `Waiting ${(delayMs / 1000).toFixed(1)}s before starting next database backup...`,
           currentDb.name
         );
         await new Promise((r) => setTimeout(r, delayMs));
@@ -489,7 +629,6 @@ export default function App() {
     addLog('warning', 'Stopping batch backup process...');
   };
 
-  // Download all completed backups as a ZIP bundle
   const handleDownloadZip = async () => {
     const completedDbs = databases.filter((d) => d.status === 'completed' && d.sqlContent);
     if (completedDbs.length === 0) {
@@ -502,6 +641,14 @@ export default function App() {
       const zipBlob = await createZipBundle(completedDbs);
       const zipFilename = `truenas_postgres_backups_${new Date().toISOString().slice(0, 10)}.zip`;
       triggerBrowserDownload(zipBlob, zipFilename);
+
+      // Record ZIP download in audit log
+      await apiFetch('/api/audit/zip-download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ databases: completedDbs.map((d) => d.name) }),
+      }).catch(() => {});
+
       addLog('success', `Downloaded all-in-one backup archive: ${zipFilename}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -509,6 +656,50 @@ export default function App() {
     }
   };
 
+  // Auth loading state
+  if (authStatus === 'LOADING') {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-300 flex items-center justify-center font-sans">
+        <div className="flex items-center gap-2.5 text-sm">
+          <RefreshCw className="w-4 h-4 animate-spin text-emerald-600" />
+          <span>Verifying session security...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Lock all dashboard pages behind Login & Mandatory MFA
+  if (authStatus !== 'AUTHENTICATED' || !currentUser) {
+    return (
+      <LoginDashboard
+        status={authStatus}
+        pendingUser={currentUser}
+        sessionExpiredNotice={sessionExpiredNotice}
+        inactivityTimeoutMinutes={inactivityTimeoutMinutes}
+        bootstrapPending={bootstrapPending}
+        bootstrapUsernameHint={bootstrapUsernameHint}
+        isDark={isDark}
+        toggleDark={toggleDark}
+        onStepChange={(nextStatus, user, csrf) => {
+          setCsrfToken(csrf);
+          setCurrentUser(user);
+          setSessionExpiredNotice(false);
+          setAuthStatus(nextStatus);
+        }}
+        onAuthSuccess={(user, csrf) => {
+          setCsrfToken(csrf);
+          setCurrentUser(user);
+          setSessionExpiredNotice(false);
+          setBootstrapPending(false);
+          setActiveTab('backups');
+          setAuthStatus('AUTHENTICATED');
+          addLog('success', `Authenticated as '${user.username}' (${user.role}) with TOTP MFA.`);
+        }}
+      />
+    );
+  }
+
+  const isIT = currentUser.role === 'IT';
   const selectedCount = databases.filter((d) => d.selected).length;
   const completedCount = databases.filter((d) => d.status === 'completed').length;
   const failedCount = databases.filter((d) => d.status === 'failed').length;
@@ -516,7 +707,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors selection:bg-emerald-500/20 selection:text-emerald-700 dark:selection:text-emerald-300">
-      {/* 3-Zone Top Navigation Contract */}
+      {/* Protected 3-Zone Top Navigation */}
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -525,26 +716,75 @@ export default function App() {
         onPrimaryAction={handleStartBatchBackup}
         isBackingUp={isBatchRunning}
         selectedCount={selectedCount}
+        currentUser={currentUser}
+        onOpenSecurityModal={() => setShowSecurityModal(true)}
+        onLogout={handleLogout}
       />
 
-      {/* Main Workspace Viewport */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
-        {/* TrueNAS Server Environment Banner */}
-        <ServerEnvBanner
-          config={serverConfig}
-          loadingConfig={loadingConfig}
-          onRefreshConfig={fetchConfig}
-          onTestConnection={handleTestConnection}
-          onDiscoverDatabases={handleDiscoverDatabases}
-          discovering={discovering}
-          simulationMode={simulationMode}
-          setSimulationMode={setSimulationMode}
-        />
+      {/* Responsive Mobile Tab Switcher */}
+      <div className="lg:hidden border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-2 flex items-center gap-2 overflow-x-auto text-xs font-medium">
+        <button
+          onClick={() => setActiveTab('backups')}
+          className={`px-3 py-1.5 rounded-md whitespace-nowrap ${
+            activeTab === 'backups'
+              ? 'bg-emerald-600 text-white'
+              : 'text-slate-600 dark:text-slate-400'
+          }`}
+        >
+          Database Queue
+        </button>
+        {isIT && (
+          <>
+            <button
+              onClick={() => setActiveTab('users')}
+              className={`px-3 py-1.5 rounded-md whitespace-nowrap ${
+                activeTab === 'users'
+                  ? 'bg-emerald-600 text-white'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              User Management
+            </button>
+            <button
+              onClick={() => setActiveTab('audit')}
+              className={`px-3 py-1.5 rounded-md whitespace-nowrap ${
+                activeTab === 'audit'
+                  ? 'bg-emerald-600 text-white'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Audit Log
+            </button>
+            <button
+              onClick={() => setActiveTab('deployment')}
+              className={`px-3 py-1.5 rounded-md whitespace-nowrap ${
+                activeTab === 'deployment'
+                  ? 'bg-emerald-600 text-white'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Deployment
+            </button>
+          </>
+        )}
+      </div>
 
-        {/* Tab Content: Backups Queue */}
+      {/* Main Protected Workspace Viewport */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+        {/* Tab Content: Backups Queue (IT & Manager) */}
         {activeTab === 'backups' && (
           <div className="space-y-6">
-            {/* Batch Progress Card (when running or has results) */}
+            <ServerEnvBanner
+              config={serverConfig}
+              loadingConfig={loadingConfig}
+              onRefreshConfig={fetchConfig}
+              onTestConnection={handleTestConnection}
+              onDiscoverDatabases={handleDiscoverDatabases}
+              discovering={discovering}
+              simulationMode={simulationMode}
+              setSimulationMode={setSimulationMode}
+            />
+
             {(isBatchRunning || completedCount > 0) && (
               <BatchProgressCard
                 isBatchRunning={isBatchRunning}
@@ -563,7 +803,6 @@ export default function App() {
               />
             )}
 
-            {/* Database Queue Table */}
             <DatabaseQueueTable
               databases={databases}
               onToggleSelect={handleToggleSelect}
@@ -577,23 +816,21 @@ export default function App() {
               activeDbId={activeDbId}
             />
 
-            {/* Live Activity Log Drawer */}
             <LogDrawer logs={logs} onClearLogs={() => setLogs([])} />
           </div>
         )}
 
-        {/* Tab Content: TrueNAS Environment & Config */}
-        {activeTab === 'server' && (
-          <div className="space-y-6">
-            <WorkflowDocsPanel />
-          </div>
+        {/* Tab Content: User Management (IT Full Admin Only) */}
+        {activeTab === 'users' && isIT && (
+          <UserManagementPanel currentUser={currentUser} />
         )}
 
-        {/* Tab Content: Deployment & GitHub */}
-        {activeTab === 'deployment' && (
-          <div className="space-y-6">
-            <WorkflowDocsPanel />
-          </div>
+        {/* Tab Content: Audit Log (IT Full Admin Only) */}
+        {activeTab === 'audit' && isIT && <AuditLogPanel />}
+
+        {/* Tab Content: Deployment & TrueNAS Environment (IT Full Admin Only) */}
+        {(activeTab === 'deployment' || activeTab === 'server') && isIT && (
+          <WorkflowDocsPanel />
         )}
       </main>
 
@@ -605,13 +842,22 @@ export default function App() {
         />
       )}
 
+      {/* Self-Service Account & Session Security Modal */}
+      {showSecurityModal && (
+        <AccountSecurityModal
+          user={currentUser}
+          inactivityTimeoutMinutes={inactivityTimeoutMinutes}
+          onClose={() => setShowSecurityModal(false)}
+        />
+      )}
+
       {/* Footer */}
       <footer className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 py-4 px-6 text-center text-xs text-slate-500 dark:text-slate-400">
         <span>TrueNAS PostgreSQL Backup Manager</span>
         <span className="mx-2">·</span>
-        <span>Sequential 1-by-1 Database Backup &amp; Downloader</span>
+        <span>Signed in as {currentUser.username} ({currentUser.role})</span>
         <span className="mx-2">·</span>
-        <span>Configured via TrueNAS Environment Variables</span>
+        <span className="tabular-nums">Idle Timeout: {inactivityTimeoutMinutes}m</span>
       </footer>
     </div>
   );

@@ -362,6 +362,36 @@ jobs:
                   <td className="py-2.5 px-3 font-mono">false</td>
                   <td className="py-2.5 px-3 font-mono">true / require</td>
                 </tr>
+                <tr>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">IT_ADMIN_USERNAME</td>
+                  <td className="py-2.5 px-3">First-boot IT administrator username</td>
+                  <td className="py-2.5 px-3 font-mono">it-admin</td>
+                  <td className="py-2.5 px-3 font-mono">it-admin</td>
+                </tr>
+                <tr>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">IT_ADMIN_EMAIL</td>
+                  <td className="py-2.5 px-3">First-boot IT administrator email</td>
+                  <td className="py-2.5 px-3 font-mono">it-admin@truenas.local</td>
+                  <td className="py-2.5 px-3 font-mono">secops@company.local</td>
+                </tr>
+                <tr>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">IT_ADMIN_PASSWORD</td>
+                  <td className="py-2.5 px-3">First-boot IT administrator password</td>
+                  <td className="py-2.5 px-3 font-mono">(bootstrapped)</td>
+                  <td className="py-2.5 px-3 font-mono">StrongVaultPass#26</td>
+                </tr>
+                <tr>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">SESSION_SECRET</td>
+                  <td className="py-2.5 px-3">Secret key for AES-256-GCM TOTP encryption &amp; CSRF</td>
+                  <td className="py-2.5 px-3 font-mono">auto-generated</td>
+                  <td className="py-2.5 px-3 font-mono">64-char-hex-string</td>
+                </tr>
+                <tr>
+                  <td className="py-2.5 px-3 font-mono font-medium text-emerald-600 dark:text-emerald-400">SESSION_INACTIVITY_MINUTES</td>
+                  <td className="py-2.5 px-3">Idle session expiration timeout in minutes</td>
+                  <td className="py-2.5 px-3 font-mono">15</td>
+                  <td className="py-2.5 px-3 font-mono">15</td>
+                </tr>
               </tbody>
             </table>
           </div>
